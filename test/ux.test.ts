@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { call, done, runSession } from "./support/harness.js";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { call, done, removeWorkspace, runSession, workspaceFromFixture } from "./support/harness.js";
 
 test("ux: a reply with no tool call is nudged, then recovers", async () => {
   const result = await runSession({
@@ -18,6 +20,30 @@ test("ux: a reply with no tool call is nudged, then recovers", async () => {
   );
   assert.ok(result.toolCalls.some((c) => c.tool === "list_dir"), "recovery emitted a real call");
   assert.ok(result.logs.some((l) => l.includes("task complete")));
+});
+
+test("ux: an unfenced tool call (e.g. copied from a code block) still runs", async () => {
+  const dir = await workspaceFromFixture();
+  try {
+    const bare = '{ "tool": "run_command", "args": { "command": "rm hello.txt" } }';
+    const result = await runSession({
+      workspaceDir: dir,
+      task: "Create then remove hello.txt.",
+      replies: [
+        call("write_file", { path: "hello.txt", content: "hi\n" }),
+        bare,
+        done("Removed hello.txt."),
+      ],
+    });
+
+    const ran = result.toolCalls.find((c) => c.tool === "run_command");
+    assert.equal(ran?.args.command, "rm hello.txt", "the unfenced call must execute");
+    assert.ok(!existsSync(join(dir, "hello.txt")), "the unfenced rm should have removed the file");
+    assert.ok(!result.logs.some((l) => l.includes("no tool call")), "no nudge should be needed");
+    assert.ok(result.logs.some((l) => l.includes("task complete")));
+  } finally {
+    await removeWorkspace(dir);
+  }
 });
 
 test("ux: a malformed tool block gets a correction frame and can recover", async () => {

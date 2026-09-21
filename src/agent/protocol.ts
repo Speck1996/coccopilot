@@ -14,7 +14,13 @@ export interface ParsedAssistant {
   raw?: string;
 }
 
-const FENCE_RE = /```([a-z]*)[ \t]*\r?\n([\s\S]*?)```/gi;
+/**
+ * Recognizes a fenced block. Tolerant on purpose: the language tag may contain
+ * letters, digits, `.`, `_`, `+`, or `-` (e.g. `coccopilot-json`), may be preceded
+ * by spaces, and the body may begin on the same line as the tag. Copilot clients
+ * vary in how they emit the fence, and a near-miss here silently degrades to prose.
+ */
+const FENCE_RE = /```[ \t]*([a-z0-9_.+-]*)[ \t]*\r?\n?([\s\S]*?)```/gi;
 
 /**
  * Copilot is asked to emit one or more fenced blocks like:
@@ -31,6 +37,11 @@ const FENCE_RE = /```([a-z]*)[ \t]*\r?\n([\s\S]*?)```/gi;
  *
  * We scan every fenced block, try to parse the body as JSON, and collect tool calls.
  * Everything else is left as prose.
+ *
+ * Some Copilot clients strip the fence (e.g. the code block's "Copy" button copies
+ * the body alone), so when no fenced call is found we also accept a bare JSON object
+ * whose call key is present. The bare pass is deliberately narrow: an object that
+ * merely contains `{`/`}` in prose must not be mistaken for a tool call.
  */
 export function parseAssistant(raw: string, vocabulary: Vocabulary = agentVocabulary): ParsedAssistant {
   const text = raw ?? "";
@@ -64,6 +75,24 @@ export function parseAssistant(raw: string, vocabulary: Vocabulary = agentVocabu
     }
   }
 
+  let prose = stripFences(text);
+
+  // Fall back to an unfenced call object. Only run when the fenced pass found nothing,
+  // so a normal reply can never be reinterpreted by this looser path.
+  if (calls.length === 0) {
+    const bare = scanBareCalls(text, vocabulary);
+    if (bare) {
+      if (bare.calls.length > 0) {
+        calls.push(...bare.calls);
+        rawBlock = bare.raw;
+        prose = stripFences(stripSpans(text, bare.spans));
+      } else if (bare.error) {
+        parseError = bare.error;
+        rawBlock = bare.raw;
+      }
+    }
+  }
+
   if (calls.some((c) => c.tool === "done")) {
     done = true;
   }
@@ -73,7 +102,102 @@ export function parseAssistant(raw: string, vocabulary: Vocabulary = agentVocabu
     done = true;
   }
 
-  return { text: stripFences(text), calls, done, parseError, raw: rawBlock };
+  return { text: prose, calls, done, parseError, raw: rawBlock };
+}
+
+/** A bare (unfenced) call object found in prose. */
+interface BareScan {
+  calls: ToolCall[];
+  /** Character spans of the call objects, for removal from the prose. */
+  spans: Array<[number, number]>;
+  /** The first call object, for diagnostics. */
+  raw?: string;
+  /** Set when an object looked like a call but its JSON would not parse. */
+  error?: string;
+}
+
+/**
+ * Look for a tool call emitted without a fence: a brace-balanced JSON object that
+ * carries the vocabulary's call key (or the legacy `tool`/`tool_name` keys). We only
+ * treat the object as a call when it actually resolves to one, so incidental braces
+ * in prose are ignored. An object that names a routine but is not valid JSON is
+ * reported as a parse error rather than silently becoming prose.
+ */
+function scanBareCalls(text: string, vocabulary: Vocabulary): BareScan | undefined {
+  const key = escapeForRegex(vocabulary.callKey);
+  // Object-key shaped: quoted or unquoted, at the start of the object or after a comma.
+  const gate = new RegExp(`(?:^|[{,\\s])["']?(?:tool|tool_name|name|${key})["']?\\s*:`);
+  const calls: ToolCall[] = [];
+  const spans: Array<[number, number]> = [];
+  let raw: string | undefined;
+  let error: string | undefined;
+
+  for (const [start, end] of objectSpans(text)) {
+    const body = text.slice(start, end);
+    // Require the call key to appear, so an unrelated JSON object in prose is ignored.
+    if (!gate.test(body)) continue;
+    const parsed = tryParseJson(body);
+    if (parsed === undefined) {
+      if (!error) {
+        error = `could not parse JSON in bare object: ${body.slice(0, 200)}`;
+        raw = body;
+      }
+      continue;
+    }
+    const extracted = extractCalls(parsed, vocabulary);
+    if (extracted.length > 0) {
+      calls.push(...extracted);
+      spans.push([start, end]);
+      raw = raw ?? body;
+    }
+  }
+
+  if (calls.length === 0 && !error) return undefined;
+  return { calls, spans, raw, error: calls.length > 0 ? undefined : error };
+}
+
+/** Spans of the outermost brace-balanced `{...}` runs, skipping braces inside strings. */
+function objectSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}" && depth > 0) {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        spans.push([start, i + 1]);
+        start = -1;
+      }
+    }
+  }
+  return spans;
+}
+
+/** Remove the given non-overlapping, ascending spans from `text`. */
+function stripSpans(text: string, spans: Array<[number, number]>): string {
+  if (spans.length === 0) return text;
+  let out = "";
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    if (start < cursor) continue;
+    out += text.slice(cursor, start);
+    cursor = end;
+  }
+  return out + text.slice(cursor);
 }
 
 function stripFences(text: string): string {
