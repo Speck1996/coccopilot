@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/coccopilot_logo.png" alt="coccopilot logo" width="240">
+  <img src="assets/coccopilot.png" alt="coccopilot logo" width="240">
 </p>
 
 # coccopilot
