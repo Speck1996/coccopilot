@@ -1,0 +1,85 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { call, done, removeWorkspace, workspaceFromFixture } from "./support/harness.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO = resolve(__dirname, "..");
+
+interface RunResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/** Spawn the real CLI in manual mode, feeding scripted replies over stdin. */
+function runCli(args: string[], stdin: string): Promise<RunResult> {
+  return new Promise((resolveRun) => {
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT; // so the child CLI behaves as it would for a real operator
+    const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], {
+      cwd: REPO,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (b: Buffer) => (stdout += b.toString("utf8")));
+    child.stderr.on("data", (b: Buffer) => (stderr += b.toString("utf8")));
+    child.on("close", (code) => resolveRun({ code, stdout, stderr }));
+    child.stdin.end(stdin);
+  });
+}
+
+test("e2e: the CLI runs a task end to end in manual mode", { timeout: 30_000 }, async () => {
+  const dir = await workspaceFromFixture();
+  try {
+    // Replies are sentinel-delimited; the CLI reads them from piped stdin.
+    const replies =
+      "surveying\n" +
+      call("read_file", { path: "src/greet.js" }) +
+      "\nEND\n" +
+      done("Explained the fixture project.") +
+      "\nEND\n";
+
+    const result = await runCli(
+      ["--no-clipboard", "--sentinel", "END", "--yes", "--cwd", dir, "Explain src/greet.js"],
+      replies,
+    );
+
+    assert.equal(result.code, 0, `CLI should exit cleanly\n${result.stderr}`);
+    assert.match(result.stdout, /\[coccopilot\] workspace:/);
+    assert.match(result.stdout, /manual paste/);
+    assert.match(result.stdout, /tool: read_file/);
+    assert.match(result.stdout, /task complete: Explained the fixture project\./);
+    // The reply input prompt carries the status line.
+    assert.match(result.stdout, /\[idle · waiting for a task\]/);
+  } finally {
+    await removeWorkspace(dir);
+  }
+});
+
+test("e2e: the CLI creates a new project in a fresh workspace", { timeout: 30_000 }, async () => {
+  const dir = await workspaceFromFixture();
+  try {
+    const replies =
+      call("write_file", { path: "src/answer.js", content: "export const answer = 42;\n" }) +
+      "\nEND\n" +
+      done("Added src/answer.js.") +
+      "\nEND\n";
+
+    const result = await runCli(
+      ["--no-clipboard", "--sentinel", "END", "--yes", "--cwd", dir, "Add an answer module"],
+      replies,
+    );
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(existsSync(join(dir, "src", "answer.js")), "the new file should exist on disk");
+    assert.match(result.stdout, /task complete: Added src\/answer\.js\./);
+  } finally {
+    await removeWorkspace(dir);
+  }
+});

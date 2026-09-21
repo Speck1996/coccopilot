@@ -8,6 +8,12 @@ export interface Config {
   clipboard: boolean;
   /** Manual-paste sentinel line. */
   sentinel: string;
+  /**
+   * Largest outgoing message (characters) handed over in a single paste. Messages
+   * above this are split into numbered parts, because the Copilot composer rejects
+   * an oversized paste. Zero disables splitting.
+   */
+  maxMessageChars: number;
   /** Steps per continuation before coccopilot asks the model to continue or finish. */
   maxTurns: number;
   /** How many times the per-task step budget may be extended. */
@@ -32,8 +38,21 @@ function num(v: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/** Whole number that may legitimately be zero (e.g. "disable"). */
+function numOrZero(v: string | undefined, fallback: number): number {
+  if (v === undefined) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 export const DEFAULT_WEBAPP_URL = "https://copilot.microsoft.com/";
 export const DEFAULT_SENTINEL = "<<<END>>>";
+/**
+ * Default paste budget, chosen to sit below where the Copilot composer starts
+ * rejecting a paste but above the size of the priming message. A batched
+ * `TOOL RESULT` frame routinely exceeds this and is split into parts.
+ */
+export const DEFAULT_MAX_MESSAGE_CHARS = 8000;
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
   const env = process.env;
@@ -45,6 +64,10 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     webappUrl: overrides.webappUrl ?? env.COCCOPILOT_WEBAPP ?? DEFAULT_WEBAPP_URL,
     clipboard: overrides.clipboard ?? bool(env.COCCOPILOT_CLIPBOARD, true),
     sentinel: overrides.sentinel ?? env.COCCOPILOT_SENTINEL ?? DEFAULT_SENTINEL,
+    maxMessageChars:
+      (overrides.maxMessageChars !== undefined && Number.isFinite(overrides.maxMessageChars)
+        ? overrides.maxMessageChars
+        : undefined) ?? numOrZero(env.COCCOPILOT_MAX_MESSAGE_CHARS, DEFAULT_MAX_MESSAGE_CHARS),
     maxTurns: overrides.maxTurns ?? num(env.COCCOPILOT_MAX_TURNS, 25),
     maxContinuations: overrides.maxContinuations ?? num(env.COCCOPILOT_MAX_CONTINUATIONS, 5),
     autoApprove: overrides.autoApprove ?? bool(env.COCCOPILOT_YES, false),

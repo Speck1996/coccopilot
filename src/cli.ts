@@ -16,6 +16,7 @@ interface CliArgs {
   webapp?: string;
   maxTurns?: number;
   maxContinuations?: number;
+  maxMessageChars?: number;
   yes: boolean;
   continueSession: boolean;
   dryRun: boolean;
@@ -32,6 +33,7 @@ function parseArgs(argv: string[]): CliArgs {
   let webapp: string | undefined;
   let maxTurns: number | undefined;
   let maxContinuations: number | undefined;
+  let maxMessageChars: number | undefined;
   let yes = false;
   let continueSession = false;
   let dryRun = false;
@@ -47,6 +49,7 @@ function parseArgs(argv: string[]): CliArgs {
     else if (arg === "--webapp") webapp = argv[++i];
     else if (arg === "--max-turns") maxTurns = Number(argv[++i]);
     else if (arg === "--continuations") maxContinuations = Number(argv[++i]);
+    else if (arg === "--max-message-chars") maxMessageChars = Number(argv[++i]);
     else if (arg === "--dry-run") dryRun = true;
     else if (arg === "--no-code-interpreter") noCodeInterpreter = true;
     else if (arg === "--no-primer") injectPrimer = false;
@@ -69,6 +72,7 @@ function parseArgs(argv: string[]): CliArgs {
     webapp,
     maxTurns,
     maxContinuations,
+    maxMessageChars,
     yes,
     continueSession,
     dryRun,
@@ -98,6 +102,7 @@ function printUsage(): void {
       "  --sentinel <text>      line that ends a manual paste (default: " + DEFAULT_SENTINEL + ")",
       "  --max-turns <n>        steps per continuation (default: 25)",
       "  --continuations <n>    times the step budget may be extended before sealing (default: 5)",
+      "  --max-message-chars <n> split outgoing messages larger than n chars into parts (default: 8000, 0 disables)",
       "  --dry-run              probe the clipboard and print the hand-off mode; send nothing",
       "  --no-code-interpreter  add prompt framing forbidding the built-in Code Interpreter",
       "  --no-primer            skip priming (assumes the thread already has the protocol)",
@@ -295,6 +300,7 @@ async function main(): Promise<void> {
     webappUrl: args.webapp,
     maxTurns: args.maxTurns,
     maxContinuations: args.maxContinuations,
+    maxMessageChars: args.maxMessageChars,
     autoApprove: args.yes,
     continueSession: args.continueSession,
     noCodeInterpreter: args.noCodeInterpreter,
@@ -323,6 +329,7 @@ async function main(): Promise<void> {
     webappUrl: config.webappUrl,
     sentinel: config.sentinel,
     forceManual: !config.clipboard,
+    maxMessageChars: config.maxMessageChars,
     terminal,
     log,
   });

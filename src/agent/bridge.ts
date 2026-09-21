@@ -1,5 +1,5 @@
 import type { ToolRegistry } from "../tools/registry.js";
-import type { ToolContext } from "../tools/types.js";
+import type { ToolCall, ToolContext, ToolResult } from "../tools/types.js";
 import type { Workspace } from "../sandbox/workspace.js";
 import type { Approver, CommandPolicy } from "../sandbox/policy.js";
 import type { CopilotChannel } from "../human/channel.js";
@@ -42,6 +42,8 @@ export interface BridgeOptions {
   /** How many times the step budget may be extended before forcing the done block. */
   maxContinuations: number;
   log: (msg: string) => void;
+  /** Observe each tool call as it is about to run, then again with its result. */
+  onToolCall?: (call: ToolCall, result?: ToolResult) => void;
   /** Prime a fresh conversation with the protocol before going idle. */
   injectPrimer?: boolean;
   noCodeInterpreter?: boolean;
@@ -59,6 +61,7 @@ type State = "priming" | "idle" | "working";
 
 const MAX_NUDGES = 2;
 const MARKER = "[coccopilot]";
+const RULE = "─".repeat(64);
 
 /**
  * Human-operated bridge. coccopilot does not touch the browser: it renders each
@@ -84,7 +87,7 @@ export function runBridge(opts: BridgeOptions): Bridge {
 
   const ctx: ToolContext = { workspace, policy, approver: opts.approver, log };
 
-  /** Render an outgoing message for the operator. */
+  /** Render an outgoing message for the operator (splitting is the channel's job). */
   async function dispatch(text: string): Promise<void> {
     await channel.send(`${MARKER} ${text}`);
   }
@@ -94,8 +97,26 @@ export function runBridge(opts: BridgeOptions): Bridge {
   }
 
   async function runCalls(calls: ReturnType<typeof parseAssistant>["calls"]): Promise<void> {
-    const results = await executeToolCalls(calls, { registry, ctx, log, vocabulary });
+    const results = await executeToolCalls(calls, {
+      registry,
+      ctx,
+      log,
+      vocabulary,
+      onToolCall: opts.onToolCall,
+    });
     await post(frameToolResults(results, vocabulary));
+  }
+
+  /** Compact progress line shown beside the reply input prompt. */
+  function statusLine(): string {
+    if (state === "priming") return "priming · waiting for the protocol acknowledgement";
+    if (state === "idle") return "idle · waiting for a task";
+    return `working · step ${taskTurns + 1}/${maxTurns}`;
+  }
+
+  /** Update the progress line immediately (not only at the next input prompt). */
+  function refreshStatus(): void {
+    channel.report?.(statusLine());
   }
 
   async function handleReply(raw: string): Promise<void> {
@@ -166,9 +187,12 @@ export function runBridge(opts: BridgeOptions): Bridge {
     }
 
     // No tool call while we asked for one: nudge, re-prime, then stand by.
+    // Drift is checked before refusal: a reply that reached for the built-in
+    // interpreter is not a refusal, even though the refusal matcher also lists
+    // those markers, and it needs the interpreter-specific corrective.
+    const drifted = detectDrift(raw);
     const kind = classifyReply(parsed.text || raw);
-    const refusal = kind === "refusal";
-    const drifted = !refusal && detectDrift(raw);
+    const refusal = !drifted && kind === "refusal";
     if (nudges < MAX_NUDGES) {
       nudges++;
       log(
@@ -233,13 +257,16 @@ export function runBridge(opts: BridgeOptions): Bridge {
       await post(continuePrompt(persona));
       return;
     }
+    // Stay in "working": the model's done block must be handled, and a done emitted
+    // while idle would just be left alone. If the model instead keeps working, it is
+    // asked for the done block again.
     log(`step budget and continuations exhausted (${maxContinuations}); requesting the done block`);
     await post(donePrompt(persona));
-    state = "idle";
   }
 
   function finishTask(summary: unknown): void {
-    log(`done: ${typeof summary === "string" ? summary : "(no summary)"}`);
+    const text = typeof summary === "string" && summary.trim() ? summary : "(no summary)";
+    log(`${RULE}\n${MARKER} task complete: ${text}\n${MARKER} standing by — hand in the next task, or Ctrl-C to exit.\n${RULE}`);
     state = "idle";
     taskTurns = 0;
     continuations = 0;
@@ -286,13 +313,14 @@ export function runBridge(opts: BridgeOptions): Bridge {
     try {
       await prime();
       while (!stopped) {
-        const reply = await channel.receive();
+        const reply = await channel.receive(statusLine());
         if (stopped) break;
         if (!reply.trim()) {
           log("no reply received; ending the session");
           break;
         }
         await handleReply(reply);
+        refreshStatus();
       }
     } catch (err) {
       log(`bridge error: ${(err as Error).message}`);

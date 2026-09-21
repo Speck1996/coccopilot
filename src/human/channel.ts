@@ -1,5 +1,6 @@
 import { detectClipboard, normalizeClipboard, type Clipboard } from "./clipboard.js";
 import { HumanTerminal } from "./terminal.js";
+import { TranscriptChannel } from "./transcript.js";
 
 /**
  * The human-in-the-loop transport to the Copilot webapp. coccopilot never touches
@@ -10,8 +11,13 @@ export interface CopilotChannel {
   readonly mode: "clipboard" | "manual";
   /** Render an outgoing message and hand it to the operator (clipboard or print). */
   send(message: string): Promise<void>;
-  /** Wait for the operator to bring back Copilot's reply. */
-  receive(prompt?: string): Promise<string>;
+  /**
+   * Wait for the operator to bring back Copilot's reply. `status` is a compact
+   * progress line coccopilot shows beside the input prompt (e.g. the current step).
+   */
+  receive(status?: string): Promise<string>;
+  /** Update the status line between turns, when the backend supports it. */
+  report?(status: string): void;
   close(): void;
 }
 
@@ -24,6 +30,15 @@ export interface ChannelOptions {
   sentinel?: string;
   /** Force manual paste mode even if a clipboard is available. */
   forceManual?: boolean;
+  /** Inject a clipboard backend instead of detecting one (used by tests). */
+  clipboard?: Clipboard | null;
+  /**
+   * Largest outgoing message (characters) to hand over in one paste. Messages above
+   * this are split into numbered parts; the Copilot composer rejects oversized
+   * pastes outright, so a large `TOOL RESULT` frame must not arrive in one go.
+   * Zero or undefined disables splitting.
+   */
+  maxMessageChars?: number;
   /**
    * Shared stdin reader. The caller owns it so command approvals can use the same
    * input stream instead of opening a competing readline.
@@ -45,33 +60,57 @@ function charCount(text: string): string {
 }
 
 /** Clipboard channel: outgoing copied for paste; replies read back from the clipboard. */
-class ClipboardChannel implements CopilotChannel {
+class ClipboardChannel extends TranscriptChannel {
   readonly mode = "clipboard" as const;
   private lastSent = "";
+  private instructionsShown = false;
 
   constructor(
     private readonly clipboard: Clipboard,
     private readonly terminal: HumanTerminal,
     private readonly webappUrl: string,
     private readonly log: (msg: string) => void,
-  ) {}
+    maxMessageChars?: number,
+  ) {
+    super(maxMessageChars);
+  }
 
-  async send(message: string): Promise<void> {
+  protected async onSend(message: string): Promise<void> {
     await this.clipboard.write(message);
     this.lastSent = message;
     this.terminal.write(`\n${RULE}`);
-    this.terminal.write(`[coccopilot] message copied to your clipboard (${charCount(message)}).`);
-    this.terminal.write("");
-    this.terminal.write(`  1. Open the Copilot webapp:  ${this.webappUrl}`);
-    this.terminal.write("  2. Paste it into the composer and send.");
-    this.terminal.write("  3. Select Copilot's full reply and copy it (Cmd/Ctrl+C).");
+    if (this.wasSplit) {
+      this.terminal.write(
+        `[coccopilot] copied part ${this.partNumber}/${this.partCount} (${charCount(message)}). ` +
+          "Paste it, send; then press Enter here to copy the next part.",
+      );
+    } else if (!this.instructionsShown) {
+      // The numbered steps are the same every turn; show them once so a long task
+      // is not buried under a wall of repeated instructions.
+      this.instructionsShown = true;
+      this.terminal.write(`[coccopilot] message copied to your clipboard (${charCount(message)}).`);
+      this.terminal.write("");
+      this.terminal.write(`  1. Open the Copilot webapp:  ${this.webappUrl}`);
+      this.terminal.write("  2. Paste it into the composer and send.");
+      this.terminal.write("  3. Select Copilot's full reply and copy it (Cmd/Ctrl+C).");
+    } else {
+      this.terminal.write(`[coccopilot] copied to clipboard (${charCount(message)}) — paste, send, copy the reply.`);
+    }
     this.terminal.write(`${RULE}`);
   }
 
-  async receive(prompt?: string): Promise<string> {
+  protected async beforeNextPart(index: number, total: number): Promise<boolean> {
+    this.terminal.write(
+      `[coccopilot] press Enter to copy part ${index}/${total} once you have sent part ${index - 1}.`,
+    );
+    await this.terminal.nextLine();
+    return !this.terminal.isClosed;
+  }
+
+  protected async nextReply(status?: string): Promise<string> {
     while (true) {
       this.terminal.write(
-        `[coccopilot] ${prompt ?? "Press Enter once Copilot's reply is on your clipboard."}`,
+        `[coccopilot] ${compactStatus(status)}Press Enter once Copilot's reply is on your clipboard.`,
       );
       const typed = await this.terminal.nextLine();
       const closed = this.terminal.isClosed;
@@ -103,25 +142,28 @@ class ClipboardChannel implements CopilotChannel {
       return text;
     }
   }
-
-  close(): void {
-    /* nothing to release */
-  }
 }
 
 /** Manual channel: no clipboard. The operator pastes the reply into the terminal. */
-class ManualChannel implements CopilotChannel {
+class ManualChannel extends TranscriptChannel {
   readonly mode = "manual" as const;
 
   constructor(
     private readonly terminal: HumanTerminal,
     private readonly webappUrl: string,
     private readonly sentinel: string,
-  ) {}
+    maxMessageChars?: number,
+  ) {
+    super(maxMessageChars);
+  }
 
-  async send(message: string): Promise<void> {
+  protected async onSend(message: string): Promise<void> {
     this.terminal.write(`\n${RULE}`);
-    this.terminal.write(`[coccopilot] send this to Copilot (${charCount(message)}):`);
+    this.terminal.write(
+      this.wasSplit
+        ? `[coccopilot] send part ${this.partNumber}/${this.partCount} to Copilot, then press Enter for the next part:`
+        : `[coccopilot] send this to Copilot (${charCount(message)}):`,
+    );
     this.terminal.write(`${RULE}`);
     this.terminal.write(message);
     this.terminal.write(`${RULE}`);
@@ -129,16 +171,25 @@ class ManualChannel implements CopilotChannel {
     this.terminal.write("Select the text above, paste it into the composer, and send.");
   }
 
-  async receive(prompt?: string): Promise<string> {
+  protected async beforeNextPart(index: number, total: number): Promise<boolean> {
     this.terminal.write(
-      `[coccopilot] ${prompt ?? "Paste Copilot's reply below"}; finish with a line containing only ${this.sentinel}.`,
+      `[coccopilot] press Enter to print part ${index}/${total} once you have sent part ${index - 1}.`,
+    );
+    await this.terminal.nextLine();
+    return !this.terminal.isClosed;
+  }
+
+  protected async nextReply(status?: string): Promise<string> {
+    this.terminal.write(
+      `[coccopilot] ${compactStatus(status)}Paste Copilot's reply below; finish with a line containing only ${this.sentinel}.`,
     );
     return this.terminal.readUntil(this.sentinel);
   }
+}
 
-  close(): void {
-    /* nothing to release */
-  }
+/** Bracketed progress prefix shown beside the input prompt, when a status is known. */
+function compactStatus(status?: string): string {
+  return status ? `[${status}] ` : "";
 }
 
 /**
@@ -150,10 +201,10 @@ export async function createChannel(opts: ChannelOptions): Promise<ChannelHandle
   const sentinel = opts.sentinel ?? DEFAULT_SENTINEL;
 
   if (!opts.forceManual) {
-    const clipboard = await detectClipboard(opts.log);
+    const clipboard = opts.clipboard ?? (await detectClipboard(opts.log));
     if (clipboard) {
       return {
-        channel: new ClipboardChannel(clipboard, terminal, opts.webappUrl, opts.log),
+        channel: new ClipboardChannel(clipboard, terminal, opts.webappUrl, opts.log, opts.maxMessageChars),
         description: `clipboard (${clipboard.description})`,
       };
     }
@@ -161,7 +212,7 @@ export async function createChannel(opts: ChannelOptions): Promise<ChannelHandle
   }
 
   return {
-    channel: new ManualChannel(terminal, opts.webappUrl, sentinel),
+    channel: new ManualChannel(terminal, opts.webappUrl, sentinel, opts.maxMessageChars),
     description: `manual paste (finish with ${sentinel})`,
   };
 }

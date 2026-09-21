@@ -126,6 +126,7 @@ you.
 | `--sentinel <text>` | Line that ends a manual paste. Default: `<<<END>>>`. |
 | `--max-turns <n>` | Steps per continuation. Default: `25`. |
 | `--continuations <n>` | Times the step budget may be extended before sealing. Default: `5`. |
+| `--max-message-chars <n>` | Split outgoing messages larger than `n` chars into numbered parts. Default: `8000`; `0` disables. |
 | `--persona <name>` | `agent` (default) or `notation` (refusal-resistant work-order framing). |
 | `--no-primer` | Skip priming. Use when the thread already contains the protocol (pair with `-c`). |
 | `--dry-run` | Detect the clipboard backend and print the hand-off mode; send nothing. |
@@ -163,10 +164,18 @@ coccopilot --no-clipboard --cwd ./myapp
 
 In clipboard mode (the default when a backend is detected):
 
-- **Outgoing:** coccopilot copies the message and prints the paste/send/copy steps. You
-  paste it into Copilot and send.
+- **Outgoing:** coccopilot copies the message and prints the paste/send/copy steps once;
+  later turns show a compact one-line header so long tasks stay readable. You paste it
+  into Copilot and send.
+- **Oversized messages are split.** The Copilot composer rejects a paste that is too
+  large (a batched `TOOL RESULT` frame carrying a whole file, for example). coccopilot
+  splits any message above `--max-message-chars` into numbered parts: it copies part 1
+  (`[coccopilot part 1/3]` … `[coccopilot end part 1/3]`), you paste and send it, then
+  press Enter to copy the next part. Nothing is dropped — the parts rejoin to the exact
+  original.
 - **Incoming:** select Copilot's whole reply, copy it, then press **Enter** in
-  coccopilot's terminal. coccopilot reads it back.
+  coccopilot's terminal. coccopilot reads it back. The prompt carries a status line
+  (e.g. `[working · step 3/25]`) so you can see where the task is.
 - **Guards:** if the clipboard is empty, or still holds the exact text coccopilot just
   gave you, it re-prompts instead of misreading your own draft.
 - **Short reply?** You can also just type it on the same line and press Enter instead of
@@ -188,6 +197,8 @@ a line containing only `<<<END>>>`.
 - **Missing-tool reply.** If Copilot drifts into the product's built-in Code Interpreter
   instead of emitting a block, coccopilot replies with a corrective nudge (and re-primes
   if it persists).
+- **Task completion is announced.** When the model emits `done`, coccopilot prints a
+  clear "task complete" banner and returns to idle, ready for the next task.
 
 ## Tools the agent can use
 
@@ -278,6 +289,7 @@ Environment variables (flags take precedence):
 | `COCCOPILOT_SENTINEL` | `<<<END>>>` | Manual-paste terminator |
 | `COCCOPILOT_MAX_TURNS` | `25` | Steps per continuation |
 | `COCCOPILOT_MAX_CONTINUATIONS` | `5` | Times the step budget may be extended before sealing |
+| `COCCOPILOT_MAX_MESSAGE_CHARS` | `8000` | Split outgoing messages larger than this into parts (`0` disables) |
 | `COCCOPILOT_YES` | `false` | Auto-approve shell commands |
 | `COCCOPILOT_CONTINUE` | `false` | Continue the previous conversation |
 | `COCCOPILOT_PERSONA` | `agent` | `agent` or `notation` framing |
@@ -295,6 +307,7 @@ src/
   human/
     clipboard.ts         cross-platform clipboard detection/read/write
     terminal.ts          shared stdin reader (Enter-to-continue, manual paste, approvals)
+    transcript.ts        transcript-recording channel base (status line + audit trail)
     channel.ts           CopilotChannel: clipboard + manual-paste hand-off to the webapp
   agent/
     bridge.ts            human-operated bridge: render -> receive -> execute -> render
@@ -315,6 +328,12 @@ src/
     policy.ts            command deny-list + approval
 prompts/agent.md         the system prompt sent to Copilot (agent persona)
 prompts/agent-notation.md the refusal-resistant Engineering-Registry work-order persona
+test/
+  scenarios.test.ts      explain / create-project / refactor task simulations
+  ux.test.ts             nudge, malformed-block, refusal, drift, budget-recovery simulations
+  clipboard.test.ts      clipboard guards, manual sentinel, one-time instructions, status line
+  e2e.test.ts            spawns the real CLI in --no-clipboard mode over piped stdin
+  support/               ScriptedChannel + runSession harness, fixture project
 ```
 
 ## Troubleshooting
@@ -330,6 +349,9 @@ prompts/agent-notation.md the refusal-resistant Engineering-Registry work-order 
 - **Copilot runs the task but no files appear** — it used its built-in Code Interpreter
   instead of coccopilot routines. Use `--persona notation`; if it still goes off-script,
   name a routine explicitly (`Use the write_file tool to ...`).
+- **A paste is blocked by the composer** — the message is larger than Copilot's paste
+  limit. coccopilot splits oversized messages into numbered parts by default; if the
+  limit has moved, lower `--max-message-chars` (e.g. `--max-message-chars 4000`).
 - **Commands keep getting denied** — you answered `n` at the `[y/N]` prompt. Approve, or
   pass `-y`.
 - **A command is waiting at a prompt** — coccopilot detects the idle prompt and asks you;
@@ -342,9 +364,16 @@ prompts/agent-notation.md the refusal-resistant Engineering-Registry work-order 
 ## Development
 
 ```bash
-npm run typecheck   # tsc --noEmit
+npm run typecheck   # tsc --noEmit for src/ and test/
+npm test            # node:test simulation + end-to-end suite
 npm run build       # emit to dist/
 ```
+
+The test suite drives `runBridge` against a scripted `CopilotChannel`, so the whole
+hand-off loop — including the explain/create/refactor task shapes and the nudge,
+re-prime, drift, and budget-recovery paths — can be exercised deterministically
+without a browser or the webapp. The tests live in `test/`; the fixture project they
+work against is `test/fixtures/sample-project/`.
 
 ## Limitations & notes
 

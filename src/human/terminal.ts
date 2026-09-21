@@ -10,8 +10,10 @@ export class HumanTerminal {
   private lines: string[] = [];
   private waiters: Array<(line: string) => void> = [];
   private closed = false;
+  private readonly output: NodeJS.WritableStream;
 
   constructor(input: NodeJS.ReadableStream = process.stdin, output: NodeJS.WritableStream = process.stdout) {
+    this.output = output;
     this.rl = createInterface({ input, output, terminal: false });
     this.rl.on("line", (line) => {
       const waiter = this.waiters.shift();
@@ -61,7 +63,7 @@ export class HumanTerminal {
   }
 
   write(message: string): void {
-    process.stdout.write(message.endsWith("\n") ? message : `${message}\n`);
+    this.output.write(message.endsWith("\n") ? message : `${message}\n`);
   }
 
   close(): void {
