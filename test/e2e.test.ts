@@ -62,6 +62,27 @@ test("e2e: the CLI runs a task end to end in manual mode", { timeout: 30_000 }, 
   }
 });
 
+test("e2e: an oversized hand-off is split into numbered parts", { timeout: 30_000 }, async () => {
+  const dir = await workspaceFromFixture();
+  try {
+    // A tiny budget forces the priming frame to split; blank lines advance the parts.
+    const replies = call("done", { summary: "Split hand-off verified." }) + "\nEND\n";
+    const result = await runCli(
+      ["--no-clipboard", "--sentinel", "END", "--yes", "--max-message-chars", "600", "--cwd", dir, "go"],
+      "\n".repeat(200) + replies,
+    );
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /send part 1\/\d+ to Copilot/, "the first part is labelled");
+    assert.match(result.stdout, /press Enter to print part 2\/\d+/, "later parts wait for Enter");
+    assert.match(result.stdout, /\[coccopilot part 1\/\d+\]/);
+    assert.match(result.stdout, /\[coccopilot end part 1\/\d+\]/);
+    assert.match(result.stdout, /task complete: Split hand-off verified\./);
+  } finally {
+    await removeWorkspace(dir);
+  }
+});
+
 test("e2e: the CLI creates a new project in a fresh workspace", { timeout: 30_000 }, async () => {
   const dir = await workspaceFromFixture();
   try {

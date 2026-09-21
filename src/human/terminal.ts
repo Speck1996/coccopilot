@@ -36,6 +36,15 @@ export class HumanTerminal {
     return this.closed;
   }
 
+  /**
+   * True when lines are already buffered (e.g. piped/scripted input). A closed
+   * stdin may still have lines queued, so callers that need to know whether more
+   * input is available should check this as well as `isClosed`.
+   */
+  hasBufferedInput(): boolean {
+    return this.lines.length > 0;
+  }
+
   /** Resolve with the next line the operator submits. */
   nextLine(): Promise<string> {
     const queued = this.lines.shift();

@@ -104,7 +104,9 @@ class ClipboardChannel extends TranscriptChannel {
       `[coccopilot] press Enter to copy part ${index}/${total} once you have sent part ${index - 1}.`,
     );
     await this.terminal.nextLine();
-    return !this.terminal.isClosed;
+    // Piped/scripted stdin closes while buffered lines remain; keep delivering as
+    // long as more input is queued.
+    return !this.terminal.isClosed || this.terminal.hasBufferedInput();
   }
 
   protected async nextReply(status?: string): Promise<string> {
@@ -176,7 +178,9 @@ class ManualChannel extends TranscriptChannel {
       `[coccopilot] press Enter to print part ${index}/${total} once you have sent part ${index - 1}.`,
     );
     await this.terminal.nextLine();
-    return !this.terminal.isClosed;
+    // Piped/scripted stdin closes while buffered lines remain; keep delivering as
+    // long as more input is queued.
+    return !this.terminal.isClosed || this.terminal.hasBufferedInput();
   }
 
   protected async nextReply(status?: string): Promise<string> {
