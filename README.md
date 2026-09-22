@@ -7,8 +7,9 @@
 Use the **Microsoft Copilot** web app as a coding copilot — with **you** in the loop.
 coccopilot gives Copilot a small tool protocol, lets it read/refactor/test/extend a
 local codebase, and executes the tool calls it emits. The difference from a browser
-automation tool: **you** operate the webapp and the terminal; coccopilot only automates
-the **clipboard** so the hand-off is fast.
+automation tool: **you** operate the webapp and the terminal; coccopilot only automates a
+local **cache markdown file** (and, optionally, the clipboard) so the hand-off is fast and
+is not bound by the composer's paste limit.
 
 There is no browser automation, no synthetic input into the webapp, and no scraping of
 Copilot's internal transport. You stay a real human user of the product.
@@ -16,21 +17,21 @@ Copilot's internal transport. You stay a real human user of the product.
 ```
 $ coccopilot --cwd /path/to/project
 [coccopilot] webapp:    https://copilot.microsoft.com/
-[coccopilot] reply input: clipboard (pbcopy/pbpaste)
-[coccopilot] message copied to your clipboard (7754 chars).
+[coccopilot] reply input: cache file (/path/to/project/.coccopilot/cache.md), clipboard copy when ≤ 8000 chars
+[coccopilot] results written to /path/to/project/.coccopilot/cache.md (7754 chars).
+[coccopilot] too large for the composer — attach or open the cache file instead.
 
   1. Open the Copilot webapp:  https://copilot.microsoft.com/
-  2. Paste it into the composer and send.
-  3. Select Copilot's full reply and copy it (Cmd/Ctrl+C).
+  2. Attach the cache file (or copy its contents) and send it.
+  3. Copy/select Copilot's full reply.
 ────────────────────────────────────────────────────────────────
-[coccopilot] Press Enter once Copilot's reply is on your clipboard.
+[coccopilot] [working · step 1/25] Paste Copilot's reply below; finish with a line containing only <<<END>>>.
 
-# ... you paste, send, select Copilot's reply, copy it, and press Enter
+# ... you paste Copilot's reply into the terminal, then press Enter
 [coccopilot] copilot: I'll start by surveying the workspace...
 [coccopilot] tool: list_dir {"path":"."}
 [coccopilot] result: ok — listed 12 entries in .
-[coccopilot] message copied to your clipboard (312 chars).
-# ... paste the result back into Copilot, copy Copilot's next reply, press Enter
+# ... cache.md now holds the TOOL RESULT; hand it to Copilot, paste the next reply
 # ... repeat until Copilot emits the done block; then the session goes idle
 ```
 
@@ -42,19 +43,39 @@ coccopilot --cwd /path/to/project "run the tests and fix any failures"
 
 ## How it works
 
-1. coccopilot renders a system prompt that describes a small tool protocol and **copies
-   it to your clipboard** with paste instructions.
-2. You paste it into a Copilot chat and send.
-3. Copilot replies with fenced `coccopilot` blocks containing tool calls.
-4. You select Copilot's reply, copy it, and press Enter in coccopilot's terminal.
-5. coccopilot reads the clipboard, parses the blocks, runs the tools locally, and copies
-   the framed `TOOL RESULT` back to your clipboard.
-6. You paste the result into Copilot; it acts again. Repeat until it emits `done`.
+1. coccopilot renders a system prompt that describes a small tool protocol and writes it
+   to the **cache markdown file** (`.coccopilot/cache.md` in the workspace) with paste/attach
+   instructions. If it fits under `--max-message-chars`, it is also copied to your clipboard.
+2. You hand the content to a Copilot chat — paste the copied text, or attach/open the cache
+   file — and send.
+3. Copilot replies with fenced `coccopilot` blocks containing tool calls. It may batch
+   **several tool calls in one message**; coccopilot parses all of them.
+4. You paste Copilot's reply into coccopilot's terminal, terminated by the sentinel line.
+   (Or, if you copied it, press Enter to read the clipboard.)
+5. coccopilot parses the blocks, runs the tools locally, and writes the framed `TOOL RESULT`
+   frame — one frame for the whole batch — back to the cache file.
+6. You hand that frame to Copilot; it acts again. Repeat until it emits `done`.
 7. coccopilot goes idle — start the next task whenever you like.
 
-Nothing is sent to the webapp on its own. Every turn is a deliberate copy/paste you
+Nothing is sent to the webapp on its own. Every turn is a deliberate hand-off you
 perform, and every command that runs locally is shown to you and, when non-routine,
 approved by you.
+
+### The cache markdown transport
+
+The cache file is the primary transport. It is **overwritten each turn** (one frame per
+file), so you never re-send stale content, and it is not bound by the Copilot composer's
+paste limit — a batched `TOOL RESULT` frame carrying whole files arrives intact.
+
+- **File:** `<workspace>/.coccopilot/cache.md` (override with `--cache-path` /
+  `COCCOPILOT_CACHE_PATH`). The directory is `gitignore`d automatically.
+- **Clipboard fast path:** when the frame fits under `--max-message-chars` and a clipboard
+  backend is present, coccopilot also copies it, so a small turn is still a direct paste.
+  Over the cap, the clipboard is left alone and the file is the only route.
+- **Inbound:** paste Copilot's reply into the terminal and end it with `--sentinel`
+  (`<<<END>>>`). A bare Enter reads the clipboard instead, when one is available.
+
+Disable the cache to return to the clipboard/manual hand-off with `--no-cache`.
 
 ### Why human-in-the-loop
 
@@ -77,9 +98,9 @@ layer; the human clipboard bridge is the only transport.
 
 - **Node.js >= 20**
 - **A Copilot account** you can sign into in a browser.
-- **A system clipboard** for the fast path: macOS ships `pbcopy`/`pbpaste`; Windows uses
-  PowerShell; on Linux install `wl-clipboard`, `xclip`, or `xsel`. Without one,
-  coccopilot falls back to manual paste mode automatically.
+- **A system clipboard** (optional fast path): macOS ships `pbcopy`/`pbpaste`; Windows
+  uses PowerShell; on Linux install `wl-clipboard`, `xclip`, or `xsel`. Without one,
+  coccopilot writes frames to the cache file only — you attach/open it by hand.
 - Linux/macOS/Windows.
 
 ## Installation
@@ -122,11 +143,13 @@ you.
 | --- | --- |
 | `--cwd <dir>` | Workspace root. All file tools and commands are confined here. Default: current directory. |
 | `--webapp <url>` | Copilot webapp URL shown in the hand-off instructions. Default: `https://copilot.microsoft.com/`. |
-| `--no-clipboard` | Do not use the system clipboard; paste replies into the terminal and end them with the sentinel. |
+| `--no-cache` | Do not use the cache markdown file; hand off via the clipboard or manual paste. |
+| `--cache-path <path>` | Cache markdown path. Default: `<workspace>/.coccopilot/cache.md`. |
+| `--no-clipboard` | Never touch the system clipboard (cache file only). |
 | `--sentinel <text>` | Line that ends a manual paste. Default: `<<<END>>>`. |
 | `--max-turns <n>` | Steps per continuation. Default: `25`. |
 | `--continuations <n>` | Times the step budget may be extended before sealing. Default: `5`. |
-| `--max-message-chars <n>` | Split outgoing messages larger than `n` chars into numbered parts. Default: `8000`; `0` disables. |
+| `--max-message-chars <n>` | Clipboard cap: in cached mode, frames above `n` chars skip the clipboard copy; in `--no-cache` clipboard mode they are split into numbered parts. Default: `8000`; `0` disables. |
 | `--persona <name>` | `agent` (default) or `notation` (refusal-resistant work-order framing). |
 | `--no-primer` | Skip priming. Use when the thread already contains the protocol (pair with `-c`). |
 | `--dry-run` | Detect the clipboard backend and print the hand-off mode; send nothing. |
@@ -156,34 +179,45 @@ coccopilot --cwd ./myapp "explain the architecture and list the main entry point
 # Resume the previous conversation
 coccopilot -c --cwd ./myapp
 
-# No clipboard available? Paste replies into the terminal.
+# Cache file only (never touch the clipboard)
 coccopilot --no-clipboard --cwd ./myapp
+
+# Legacy clipboard/manual hand-off (no cache file)
+coccopilot --no-cache --cwd ./myapp
 ```
 
-### The clipboard hand-off
+### The cache hand-off (default)
 
-In clipboard mode (the default when a backend is detected):
+- **Outgoing:** coccopilot writes the frame to `.coccopilot/cache.md` (overwritten each
+  turn) and prints the hand-off steps once; later turns show a compact one-line header.
+  If the frame fits under `--max-message-chars` and a clipboard is available, it is also
+  copied. Hand it to Copilot by pasting the copy or by attaching/opening the file.
+- **Incoming:** paste Copilot's reply into the terminal and end it with a line containing
+  only `--sentinel` (`<<<END>>>`). The prompt carries a status line (e.g.
+  `[working · step 3/25]`) so you can see where the task is. Press Enter with nothing
+  pasted to read the clipboard instead.
+- **Multiple tool calls:** if Copilot batches several `coccopilot` blocks in one message,
+  coccopilot runs them all and merges the results into a **single** `TOOL RESULT` frame —
+  in the file and, when it fits, on the clipboard.
+- **Guards:** reading the clipboard never accepts an empty clipboard or the exact text
+  coccopilot just handed you.
 
-- **Outgoing:** coccopilot copies the message and prints the paste/send/copy steps once;
-  later turns show a compact one-line header so long tasks stay readable. You paste it
-  into Copilot and send.
-- **Oversized messages are split.** The Copilot composer rejects a paste that is too
-  large (a batched `TOOL RESULT` frame carrying a whole file, for example). coccopilot
-  splits any message above `--max-message-chars` into numbered parts: it copies part 1
+### The clipboard hand-off (`--no-cache`)
+
+With `--no-cache`, coccopilot uses the clipboard (when a backend is detected):
+
+- **Outgoing:** it copies the message and prints the paste/send/copy steps once. You
+  paste it into Copilot and send.
+- **Oversized messages are split.** The composer rejects an oversized paste (a batched
+  `TOOL RESULT` frame carrying a whole file, for example). coccopilot splits any message
+  above `--max-message-chars` into numbered parts: it copies part 1
   (`[coccopilot part 1/3]` … `[coccopilot end part 1/3]`), you paste and send it, then
-  press Enter to copy the next part. Nothing is dropped — the parts rejoin to the exact
-  original.
-- **Incoming:** select Copilot's whole reply, copy it, then press **Enter** in
-  coccopilot's terminal. coccopilot reads it back. The prompt carries a status line
-  (e.g. `[working · step 3/25]`) so you can see where the task is.
-- **Guards:** if the clipboard is empty, or still holds the exact text coccopilot just
-  gave you, it re-prompts instead of misreading your own draft.
-- **Short reply?** You can also just type it on the same line and press Enter instead of
-  copying it.
+  press Enter to copy the next part. Nothing is dropped — the parts rejoin exactly.
+- **Incoming & guards:** as in cache mode above.
 
-In manual mode (`--no-clipboard`, or no clipboard backend): coccopilot prints each
-outgoing message, and you paste Copilot's reply into the terminal and terminate it with
-a line containing only `<<<END>>>`.
+In manual mode (`--no-cache --no-clipboard`, or no clipboard backend): coccopilot prints
+each outgoing message, and you paste Copilot's reply into the terminal and terminate it
+with a line containing only `<<<END>>>`.
 
 ### Interactive tips
 
@@ -285,11 +319,13 @@ Environment variables (flags take precedence):
 | --- | --- | --- |
 | `COCCOPILOT_WORKSPACE` | cwd | Workspace root |
 | `COCCOPILOT_WEBAPP` | `https://copilot.microsoft.com/` | Webapp URL shown in the hand-off |
-| `COCCOPILOT_CLIPBOARD` | `true` | Use the system clipboard for the reply hand-off |
+| `COCCOPILOT_CACHE` | `true` | Use the cache markdown file as the primary transport |
+| `COCCOPILOT_CACHE_PATH` | `<workspace>/.coccopilot/cache.md` | Cache markdown path |
+| `COCCOPILOT_CLIPBOARD` | `true` | Also copy small frames to the system clipboard |
 | `COCCOPILOT_SENTINEL` | `<<<END>>>` | Manual-paste terminator |
 | `COCCOPILOT_MAX_TURNS` | `25` | Steps per continuation |
 | `COCCOPILOT_MAX_CONTINUATIONS` | `5` | Times the step budget may be extended before sealing |
-| `COCCOPILOT_MAX_MESSAGE_CHARS` | `8000` | Split outgoing messages larger than this into parts (`0` disables) |
+| `COCCOPILOT_MAX_MESSAGE_CHARS` | `8000` | Clipboard cap: skip the copy (cache mode) or split into parts (`--no-cache`) above this (`0` disables) |
 | `COCCOPILOT_YES` | `false` | Auto-approve shell commands |
 | `COCCOPILOT_CONTINUE` | `false` | Continue the previous conversation |
 | `COCCOPILOT_PERSONA` | `agent` | `agent` or `notation` framing |
@@ -305,10 +341,11 @@ src/
   cli.ts                 entrypoint: flags, wiring, terminal approver, bridge lifecycle
   config.ts              env + flag configuration
   human/
+    cache.ts             cache markdown resolution/atomic write (.coccopilot/cache.md)
     clipboard.ts         cross-platform clipboard detection/read/write
     terminal.ts          shared stdin reader (Enter-to-continue, manual paste, approvals)
     transcript.ts        transcript-recording channel base (status line + audit trail)
-    channel.ts           CopilotChannel: clipboard + manual-paste hand-off to the webapp
+    channel.ts           CopilotChannel: cache/clipboard/manual hand-off to the webapp
   agent/
     bridge.ts            human-operated bridge: render -> receive -> execute -> render
     executor.ts          shared tool-call execution/framing
@@ -331,27 +368,28 @@ prompts/agent-notation.md the refusal-resistant Engineering-Registry work-order 
 test/
   scenarios.test.ts      explain / create-project / refactor task simulations
   ux.test.ts             nudge, malformed-block, refusal, drift, budget-recovery simulations
+  cache.test.ts          cache file write/overwrite, clipboard cap, sentinel + bare-Enter inbound
   clipboard.test.ts      clipboard guards, manual sentinel, one-time instructions, status line
-  e2e.test.ts            spawns the real CLI in --no-clipboard mode over piped stdin
+  e2e.test.ts            spawns the real CLI (manual and cache modes) over piped stdin
   support/               ScriptedChannel + runSession harness, fixture project
 ```
 
 ## Troubleshooting
 
 - **Clipboard never changes** — another app may own the clipboard, or you are on a
-  headless/WSL session. Run `--dry-run` to see the detected backend; if none is found,
-  use `--no-clipboard`.
+  headless/WSL session. In cache mode this is fine: the results are in
+  `.coccopilot/cache.md`. Run `--dry-run` to see the detected backend.
 - **"the clipboard still holds the message we gave you"** — you pressed Enter before
   copying Copilot's reply. Select Copilot's reply, copy it, press Enter again.
+- **Pasting the copy is blocked by the composer** — the frame is over your paste limit.
+  Just attach/open `.coccopilot/cache.md` instead; coccopilot already skipped the
+  clipboard copy for it. To raise the copy cap, increase `--max-message-chars`.
 - **"tools are not available" refusal** — Copilot is rejecting the framing. Run with
   `--persona notation`; the form-filling framing claims no capability, so there is
   nothing to refuse. The bridge also auto-recovers with a nudge and a re-prime.
 - **Copilot runs the task but no files appear** — it used its built-in Code Interpreter
   instead of coccopilot routines. Use `--persona notation`; if it still goes off-script,
   name a routine explicitly (`Use the write_file tool to ...`).
-- **A paste is blocked by the composer** — the message is larger than Copilot's paste
-  limit. coccopilot splits oversized messages into numbered parts by default; if the
-  limit has moved, lower `--max-message-chars` (e.g. `--max-message-chars 4000`).
 - **Commands keep getting denied** — you answered `n` at the `[y/N]` prompt. Approve, or
   pass `-y`.
 - **A command is waiting at a prompt** — coccopilot detects the idle prompt and asks you;

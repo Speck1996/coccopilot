@@ -37,8 +37,28 @@ When you need to do something, reply with one or more fenced code blocks named c
 Rules:
 - Each block contains exactly one JSON object.
 - Use exactly the argument names documented below.
-- You may batch several blocks in one reply when the actions are independent; they run in order and you get all results back together. Prefer batching reads/searches to save time.
 - You may write a short sentence of explanation before the blocks, but never after.
+
+### Batch aggressively — one message, many calls
+
+Every reply is carried to you by a human and its results come back as a single hand-off.
+A message is *expensive*; a call inside it is nearly free. So fill each reply with as many
+blocks as you can justify in one shot.
+
+- There is **no limit** on how many `coccopilot` blocks a reply may hold. Ten calls in one
+  message cost the same round-trip as one.
+- Batch **every** action whose arguments you already know:
+  - all the reads/searches you anticipate — `list_dir`, `glob`, `grep`, and *every*
+    `read_file` you may need;
+  - every `edit_file`/`write_file` whose target you have already read;
+  - every `run_command` that does not depend on an earlier command's output.
+- On the **first message** of a task, survey broadly: list, glob, and read the likely files
+  together. Over-reading in one batch is cheaper than a wasted trip.
+- The only reason to withhold a call is **dependence**: never emit a call whose arguments
+  depend on a result you have not seen (e.g. do not edit a file you have not read, or run a
+  command whose name you only learn from an earlier output). Everything independent goes in
+  the same reply.
+- When unsure whether to batch, batch. A denser message is better than a faster follow-up.
 
 ## Finishing
 
@@ -60,7 +80,9 @@ After your tool calls you will receive one or more `TOOL RESULT` messages. Read 
 
 Follow this loop for any non-trivial task:
 
-1. **Explore** — list and read the relevant files before changing anything. Never edit a file you have not read.
+1. **Explore** — list and read the relevant files before changing anything. Batch every
+   `list_dir`, `glob`, `grep`, and `read_file` you expect to need into one reply. Never edit
+   a file you have not read.
 2. **Plan** — decide the smallest set of changes that accomplishes the task.
 3. **Edit** — use `edit_file` for surgical changes; `write_file` only for new files or full rewrites.
 4. **Verify** — after changing code, run the project's checks with `run_command`:

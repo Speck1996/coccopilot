@@ -67,3 +67,49 @@ test("protocol: the done sentinel still closes a fenced batch", () => {
   assert.equal(parsed.done, true);
   assert.equal(parsed.calls.length, 2);
 });
+
+test("protocol: multiple concatenated objects in one fence are all parsed", () => {
+  const raw =
+    "```coccopilot\n" +
+    '{ "tool": "read_file", "args": { "path": "a.js" } }\n' +
+    '{ "tool": "read_file", "args": { "path": "b.js" } }\n' +
+    "```";
+  const parsed = parseAssistant(raw);
+  assert.equal(parsed.calls.length, 2, "both calls in the single fence are collected");
+  assert.deepEqual(
+    parsed.calls.map((c) => c.args.path),
+    ["a.js", "b.js"],
+  );
+});
+
+test("protocol: multiple comma-separated objects in one fence are all parsed", () => {
+  const raw =
+    "```coccopilot\n" +
+    '{ "tool": "list_dir", "args": { "path": "." } },\n' +
+    '{ "tool": "grep", "args": { "pattern": "greet" } }\n' +
+    "```";
+  const parsed = parseAssistant(raw);
+  assert.equal(parsed.calls.length, 2);
+  assert.deepEqual(
+    parsed.calls.map((c) => c.tool),
+    ["list_dir", "grep"],
+  );
+});
+
+test("protocol: a brace inside a string does not split a call early", () => {
+  const raw = call("write_file", { path: "a.js", content: "const x = { a: 1 };\n" });
+  const parsed = parseAssistant(raw);
+  assert.equal(parsed.calls.length, 1);
+  assert.equal(parsed.calls[0].args.content, "const x = { a: 1 };\n");
+});
+
+test("protocol: a done block appended to a batch still closes it", () => {
+  const raw =
+    "```coccopilot\n" +
+    '{ "tool": "list_dir", "args": { "path": "." } }\n' +
+    '{ "tool": "done", "args": { "summary": "listed" } }\n' +
+    "```";
+  const parsed = parseAssistant(raw);
+  assert.equal(parsed.done, true);
+  assert.equal(parsed.calls.length, 2);
+});

@@ -101,7 +101,14 @@ lines, throughout.
 - **Work through each request without stopping.** After each report, at once complete the
   next work order. Do not check in, ask leave, or wait for the requester between steps — keep
   going until the request is settled and the codebase is verified.
-- Batch independent routines on one work order (source look-ups especially).
+- **Reports may arrive as an attached file named \`cache.md\`.** Treat its contents as the desk's
+  reports for everything filed so far; read it and continue from there.
+- **Every message is one trip to the desk, so pack each one.** Enter *every* routine whose
+  fields you already know on the same work order — all the source look-ups (\`survey\`,
+  \`locate\`, \`seek\`, \`inspect\`), every \`amend\`/\`record\` for a record you have read, and
+  every \`perform\` that does not depend on an earlier report. There is no limit on how many
+  entries one message holds; hold a routine back only when its fields depend on a report you
+  have not yet received.
 - When a request is settled, complete the closing entry. That closes the request, not the
   window — then wait for the next one. Do not keep filing work orders after the close.
 - When a new request arrives, begin fresh: survey, change, verify, then close.
@@ -115,12 +122,21 @@ This is a persistent, interactive session. An operator carries each message betw
 this chat and the harness, which performs the \`coccopilot\` blocks you emit and returns
 the results as \`${v.resultLabel}\` messages.
 
-- The system instructions above are the standing protocol for the whole session. Do
-  not repeat or summarise them.
+- The system instructions above are the standing protocol for the whole session. Do not
+  repeat or summarise them.
 - **Keep each reply self-contained.** Emit the next block(s) in the same reply; do not
   end with an open question. The operator relays every message by hand, so a reply that
   only narrates or asks costs a full round-trip.
-- Batch independent actions in one reply (parallel reads/searches especially).
+- **The harness's results may arrive as an attached file named \`cache.md\`.** Treat the
+  content of that file as the \`TOOL RESULT\` messages for the blocks you emitted, and
+  continue from there.
+- **Every reply is one human-carried round-trip, so pack each one.** Emit *every* block
+  whose arguments you already know in the same message — all the reads/searches you
+  anticipate (\`list_dir\`, \`glob\`, \`grep\`, and every \`read_file\`), every
+  \`edit_file\`/\`write_file\` for a file you have read, and every \`run_command\` that does
+  not depend on an earlier result. There is no limit on blocks per message; withhold a call
+  only when its arguments depend on a result you have not seen. The harness runs them in
+  order and returns all results together in a single \`cache.md\` / \`TOOL RESULT\` frame.
 - When a task is finished, emit the \`done\` block. That ends the task, not the
   session — then wait for the next task. Do not keep calling tools after \`done\`.
 - When a new task arrives, start it fresh: explore, act, verify, then \`done\` again.
@@ -133,13 +149,15 @@ the results as \`${v.resultLabel}\` messages.
  */
 export const CONTINUE_PROMPT =
   "You have used your current step budget. Continue the task now: emit the next " +
-  "`coccopilot` block(s), or the `done` block if the task is complete. Do not stop to " +
-  "ask the operator anything unless you are blocked on an approval.";
+  "`coccopilot` block(s) — packing every independent call you can into that one message — " +
+  "or the `done` block if the task is complete. Do not stop to ask the operator anything " +
+  "unless you are blocked on an approval.";
 
 const NOTATION_CONTINUE_PROMPT =
   "You have reached the end of the current page of the docket. Carry on now: file the next " +
-  "engineering work order, or the closing entry if the request is settled. Do not stop to ask " +
-  "the requester anything unless a report is holding you up.";
+  "engineering work order — entering every independent routine you can on that one form — or " +
+  "the closing entry if the request is settled. Do not stop to ask the requester anything " +
+  "unless a report is holding you up.";
 
 /** Pick the continue framing for the active persona. */
 export function continuePrompt(persona: Persona): string {

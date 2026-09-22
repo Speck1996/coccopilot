@@ -57,8 +57,8 @@ export function parseAssistant(raw: string, vocabulary: Vocabulary = agentVocabu
     const body = match[2].trim();
     if (!body) continue;
 
-    const parsed = tryParseJson(body);
-    if (parsed === undefined) {
+    const values = tryParseJsonValues(body);
+    if (values.length === 0) {
       // A coccopilot/json block that won't parse is a protocol error worth reporting.
       const key = escapeForRegex(vocabulary.callKey);
       if (lang === "coccopilot" || new RegExp(`"(tool|name|tool_name|${key})"\\s*:`).test(body)) {
@@ -68,7 +68,7 @@ export function parseAssistant(raw: string, vocabulary: Vocabulary = agentVocabu
       continue;
     }
 
-    const extracted = extractCalls(parsed, vocabulary);
+    const extracted = values.flatMap((v) => extractCalls(v, vocabulary));
     if (extracted.length > 0) {
       calls.push(...extracted);
       rawBlock = body;
@@ -221,6 +221,59 @@ function tryParseJson(body: string): unknown | undefined {
     }
     return undefined;
   }
+}
+
+/**
+ * Parse the body of a fenced block into zero or more JSON values. A single well-formed
+ * value (object or array) is preferred; otherwise we accept several values emitted in
+ * one block — concatenated objects/arrays (`{…}\n{…}`) or comma-separated ones — which
+ * some Copilot clients produce when batching multiple tool calls under one fence. The
+ * scanner walks brace/bracket-balanced spans so a `}` inside a string never splits a
+ * value early.
+ */
+function tryParseJsonValues(body: string): unknown[] {
+  const whole = tryParseJson(body);
+  if (whole !== undefined) return [whole];
+
+  const values: unknown[] = [];
+  for (const span of jsonValueSpans(body)) {
+    const parsed = tryParseJson(span);
+    if (parsed !== undefined) values.push(parsed);
+  }
+  return values;
+}
+
+/** Spans of top-level brace/bracket-balanced JSON values in `text`, skipping strings. */
+function jsonValueSpans(text: string): string[] {
+  const spans: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{" || ch === "[") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}" || ch === "]") {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          spans.push(text.slice(start, i + 1));
+          start = -1;
+        }
+      }
+    }
+  }
+  return spans;
 }
 
 /** Accept a single call object, an array of calls, or `{ tools: [...] }`. */

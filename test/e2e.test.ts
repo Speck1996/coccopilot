@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { call, done, removeWorkspace, workspaceFromFixture } from "./support/harness.js";
@@ -46,7 +46,7 @@ test("e2e: the CLI runs a task end to end in manual mode", { timeout: 30_000 }, 
       "\nEND\n";
 
     const result = await runCli(
-      ["--no-clipboard", "--sentinel", "END", "--yes", "--cwd", dir, "Explain src/greet.js"],
+      ["--no-cache", "--no-clipboard", "--sentinel", "END", "--yes", "--cwd", dir, "Explain src/greet.js"],
       replies,
     );
 
@@ -68,7 +68,18 @@ test("e2e: an oversized hand-off is split into numbered parts", { timeout: 30_00
     // A tiny budget forces the priming frame to split; blank lines advance the parts.
     const replies = call("done", { summary: "Split hand-off verified." }) + "\nEND\n";
     const result = await runCli(
-      ["--no-clipboard", "--sentinel", "END", "--yes", "--max-message-chars", "600", "--cwd", dir, "go"],
+      [
+        "--no-cache",
+        "--no-clipboard",
+        "--sentinel",
+        "END",
+        "--yes",
+        "--max-message-chars",
+        "600",
+        "--cwd",
+        dir,
+        "go",
+      ],
       "\n".repeat(200) + replies,
     );
 
@@ -93,13 +104,35 @@ test("e2e: the CLI creates a new project in a fresh workspace", { timeout: 30_00
       "\nEND\n";
 
     const result = await runCli(
-      ["--no-clipboard", "--sentinel", "END", "--yes", "--cwd", dir, "Add an answer module"],
+      ["--no-cache", "--no-clipboard", "--sentinel", "END", "--yes", "--cwd", dir, "Add an answer module"],
       replies,
     );
 
     assert.equal(result.code, 0, result.stderr);
     assert.ok(existsSync(join(dir, "src", "answer.js")), "the new file should exist on disk");
     assert.match(result.stdout, /task complete: Added src\/answer\.js\./);
+  } finally {
+    await removeWorkspace(dir);
+  }
+});
+
+test("e2e: cache mode writes results to .coccopilot/cache.md", { timeout: 30_000 }, async () => {
+  const dir = await workspaceFromFixture();
+  try {
+    // Default mode is cache; --no-clipboard keeps the test headless and deterministic.
+    const replies = call("read_file", { path: "src/greet.js" }) + "\nEND\n" + done("Read greet.js.") + "\nEND\n";
+    const result = await runCli(
+      ["--no-clipboard", "--sentinel", "END", "--yes", "--cwd", dir, "Read src/greet.js"],
+      replies,
+    );
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /cache file/);
+    const cache = join(dir, ".coccopilot", "cache.md");
+    assert.ok(existsSync(cache), "the cache markdown should be written");
+    const body = readFileSync(cache, "utf8");
+    assert.match(body, /TOOL RESULT \(ok\): read/);
+    assert.match(body, /greet\.js/);
   } finally {
     await removeWorkspace(dir);
   }

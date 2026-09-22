@@ -2,10 +2,16 @@
 
 ## In progress
 
-- **Manual-mode ergonomics.** Clipboard mode is the fast path; ensure the manual
-  paste flow (sentinel-delimited) stays comfortable for large multi-turn tasks.
+- **Cache-mode ergonomics.** The cache markdown file is now the primary transport;
+  confirm the attach/open loop is comfortable for large multi-turn tasks and that the
+  terminal sentinel paste stays quick for long replies.
 
 ## Backlog
+
+- **Cache auto-watch.** Optionally fs-watch the cache file and consume a reply as soon
+  as it is saved, in addition to the terminal/sentinel and bare-Enter clipboard paths.
+- **Attach-aware framing.** Once Copilot reliably reads an attached `cache.md`, consider
+  dropping the clipboard copy entirely.
 
 - **Reply-input escape hatches.** At the Enter prompt, allow `r` (re-read clipboard),
   `e` (open `$EDITOR` on the reply), `s` (skip/standby), and `q` (quit). Suggested by
@@ -36,6 +42,16 @@
 
 ## Done
 
+- **Cache markdown transport.** Outgoing frames are written to
+  `<workspace>/.coccopilot/cache.md` (overwritten each turn, atomic, gitignored) instead
+  of relying solely on the clipboard, so a batched `TOOL RESULT` frame is not bound by
+  the Copilot composer's paste limit. When the frame fits under `--max-message-chars` it
+  is also copied to the clipboard for a direct paste. Inbound replies are pasted into the
+  terminal with the sentinel, or read from the clipboard on bare Enter. `--no-cache`
+  restores the clipboard/manual hand-off; `--cache-path` / `COCCOPILOT_CACHE_PATH`
+  override the location. The parser now also accepts several concatenated or
+  comma-separated JSON objects inside one fence, matching Copilot batching multiple tool
+  calls in one message; a batch is executed and merged into a single result frame.
 - **Oversized-paste splitting.** A batched `TOOL RESULT` frame routinely exceeded the
   Copilot composer's paste limit, which the UI silently rejected. Outgoing messages
   above `--max-message-chars` (`COCCOPILOT_MAX_MESSAGE_CHARS`, default 8000) are now

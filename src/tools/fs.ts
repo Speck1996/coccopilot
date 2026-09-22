@@ -2,7 +2,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, relative, isAbsolute, join, sep } from "node:path";
 import type { Tool, ToolContext } from "./types.js";
 
-const IGNORED_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "profiles", ".cache"]);
+const IGNORED_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "profiles", ".cache", ".coccopilot"]);
 const MAX_READ_BYTES = 100_000;
 
 function display(ctx: ToolContext, abs: string): string {

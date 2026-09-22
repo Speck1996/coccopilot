@@ -17,7 +17,7 @@ export interface TranscriptEntry {
  * clipboard/terminal-backed (or any other driver) in real runs.
  */
 export abstract class TranscriptChannel implements CopilotChannel {
-  abstract readonly mode: "clipboard" | "manual";
+  abstract readonly mode: "clipboard" | "manual" | "cache";
   readonly transcript: TranscriptEntry[] = [];
   private seq = 0;
   protected closed = false;

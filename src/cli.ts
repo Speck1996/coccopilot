@@ -24,6 +24,8 @@ interface CliArgs {
   persona: "agent" | "notation";
   injectPrimer: boolean;
   clipboard: boolean;
+  cache: boolean;
+  cachePath?: string;
   sentinel?: string;
 }
 
@@ -41,6 +43,8 @@ function parseArgs(argv: string[]): CliArgs {
   let persona: CliArgs["persona"] = "agent";
   let injectPrimer = true;
   let clipboard = true;
+  let cache = true;
+  let cachePath: string | undefined;
   let sentinel: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
@@ -54,6 +58,8 @@ function parseArgs(argv: string[]): CliArgs {
     else if (arg === "--no-code-interpreter") noCodeInterpreter = true;
     else if (arg === "--no-primer") injectPrimer = false;
     else if (arg === "--no-clipboard") clipboard = false;
+    else if (arg === "--no-cache") cache = false;
+    else if (arg === "--cache-path") cachePath = argv[++i];
     else if (arg === "--sentinel") sentinel = argv[++i];
     else if (arg === "--persona") persona = argv[++i] as CliArgs["persona"];
     else if (arg === "--yes" || arg === "-y") yes = true;
@@ -80,6 +86,8 @@ function parseArgs(argv: string[]): CliArgs {
     persona,
     injectPrimer,
     clipboard,
+    cache,
+    cachePath,
     sentinel,
   };
 }
@@ -98,11 +106,13 @@ function printUsage(): void {
       "options:",
       "  --cwd <dir>            workspace root (default: current directory)",
       "  --webapp <url>         Copilot webapp URL shown in the hand-off (default: copilot.microsoft.com)",
-      "  --no-clipboard         paste replies into the terminal instead of using the clipboard",
+      "  --no-cache             do not use the cache markdown file; use clipboard/manual hand-off",
+      "  --cache-path <path>    cache markdown path (default: <workspace>/.coccopilot/cache.md)",
+      "  --no-clipboard         do not copy outgoing frames to the system clipboard",
       "  --sentinel <text>      line that ends a manual paste (default: " + DEFAULT_SENTINEL + ")",
       "  --max-turns <n>        steps per continuation (default: 25)",
       "  --continuations <n>    times the step budget may be extended before sealing (default: 5)",
-      "  --max-message-chars <n> split outgoing messages larger than n chars into parts (default: 8000, 0 disables)",
+      "  --max-message-chars <n> clipboard cap: split (clipboard mode) or skip the copy (cache mode) above n chars (default: 8000, 0 disables)",
       "  --dry-run              probe the clipboard and print the hand-off mode; send nothing",
       "  --no-code-interpreter  add prompt framing forbidding the built-in Code Interpreter",
       "  --no-primer            skip priming (assumes the thread already has the protocol)",
@@ -178,15 +188,31 @@ function makeApprover(terminal: HumanTerminal, autoApprove: boolean): Approver {
 async function runDryRun(config: Config, log: (msg: string) => void): Promise<void> {
   log("dry-run: checking the human hand-off path (nothing will be sent)");
   const clipboard = await detectClipboard(log);
-  const mode = clipboard
-    ? `clipboard (${clipboard.description})`
+  const clipboardNote = clipboard
+    ? clipboard.description
     : config.clipboard
-      ? "manual paste — no clipboard backend detected"
-      : "manual paste (--no-clipboard)";
+      ? "none detected"
+      : "disabled (--no-clipboard)";
 
-  log(`dry-run: webapp      — ${config.webappUrl}`);
-  log(`dry-run: workspace   — ${config.workspace}`);
-  log(`dry-run: reply input — ${mode}`);
+  let outbound: string;
+  if (config.cache) {
+    const copy = config.clipboard && clipboard
+      ? ` + clipboard copy when ≤ ${config.maxMessageChars || "∞"} chars`
+      : "";
+    outbound = `cache file (${config.cachePath})${copy}`;
+  } else {
+    outbound = clipboard
+      ? `clipboard (${clipboard.description})`
+      : config.clipboard
+        ? "manual paste — no clipboard backend detected"
+        : "manual paste (--no-clipboard)";
+  }
+
+  log(`dry-run: webapp       — ${config.webappUrl}`);
+  log(`dry-run: workspace    — ${config.workspace}`);
+  log(`dry-run: outbound     — ${outbound}`);
+  log(`dry-run: clipboard    — ${clipboardNote}`);
+  log(`dry-run: reply input  — terminal paste (sentinel ${config.sentinel})`);
   if (!clipboard && config.clipboard) {
     log("dry-run: INFO install a clipboard tool (wl-clipboard, xclip, or xsel on Linux) to enable clipboard mode");
   }
@@ -306,6 +332,8 @@ async function main(): Promise<void> {
     noCodeInterpreter: args.noCodeInterpreter,
     persona: args.persona,
     clipboard: args.clipboard,
+    cache: args.cache,
+    cachePath: args.cachePath,
     sentinel: args.sentinel,
   });
 
@@ -329,6 +357,9 @@ async function main(): Promise<void> {
     webappUrl: config.webappUrl,
     sentinel: config.sentinel,
     forceManual: !config.clipboard,
+    cache: config.cache,
+    cachePath: config.cachePath,
+    workspaceRoot: config.workspace,
     maxMessageChars: config.maxMessageChars,
     terminal,
     log,
@@ -364,7 +395,7 @@ async function main(): Promise<void> {
       log,
     });
 
-    log("human bridge running — follow the clipboard hand-off prompts (Ctrl-C to exit)");
+    log("human bridge running — follow the hand-off prompts (Ctrl-C to exit)");
     await bridge.wait();
   } finally {
     bridge?.stop();

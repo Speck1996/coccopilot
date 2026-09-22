@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { resolveCachePath } from "./human/cache.js";
 
 export interface Config {
   workspace: string;
@@ -6,12 +7,16 @@ export interface Config {
   webappUrl: string;
   /** Use the system clipboard for the reply hand-off when one is available. */
   clipboard: boolean;
+  /** Use the cache markdown file as the primary transport (default). */
+  cache: boolean;
+  /** Resolved cache markdown path. */
+  cachePath: string;
   /** Manual-paste sentinel line. */
   sentinel: string;
   /**
-   * Largest outgoing message (characters) handed over in a single paste. Messages
-   * above this are split into numbered parts, because the Copilot composer rejects
-   * an oversized paste. Zero disables splitting.
+   * Largest outgoing message (characters) handed over in a single paste. In clipboard
+   * mode, messages above this are split into numbered parts; in cache mode it is the
+   * cap above which the clipboard copy is skipped. Zero disables splitting/capping.
    */
   maxMessageChars: number;
   /** Steps per continuation before coccopilot asks the model to continue or finish. */
@@ -63,6 +68,8 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     workspace,
     webappUrl: overrides.webappUrl ?? env.COCCOPILOT_WEBAPP ?? DEFAULT_WEBAPP_URL,
     clipboard: overrides.clipboard ?? bool(env.COCCOPILOT_CLIPBOARD, true),
+    cache: overrides.cache ?? bool(env.COCCOPILOT_CACHE, true),
+    cachePath: resolveCachePath(workspace, overrides.cachePath ?? env.COCCOPILOT_CACHE_PATH),
     sentinel: overrides.sentinel ?? env.COCCOPILOT_SENTINEL ?? DEFAULT_SENTINEL,
     maxMessageChars:
       (overrides.maxMessageChars !== undefined && Number.isFinite(overrides.maxMessageChars)
