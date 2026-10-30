@@ -8,7 +8,6 @@ import { defaultRegistry } from "../../src/tools/registry.js";
 import type { ToolCall, ToolResult } from "../../src/tools/types.js";
 import { runBridge } from "../../src/agent/bridge.js";
 import { TranscriptChannel } from "../../src/human/transcript.js";
-import type { Persona } from "../../src/agent/prompt.js";
 import type { TranscriptEntry } from "../../src/human/transcript.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -73,7 +72,6 @@ export interface SessionOptions {
   workspaceDir?: string;
   /** Seed the first turn with this task. */
   task?: string;
-  persona?: Persona;
   maxTurns?: number;
   maxContinuations?: number;
   /** Skip priming (assumes the thread already has the protocol). */
@@ -159,7 +157,6 @@ export async function runSession(opts: SessionOptions): Promise<SessionResult> {
       approver,
       maxTurns: opts.maxTurns ?? 25,
       maxContinuations: opts.maxContinuations ?? 5,
-      persona: opts.persona,
       injectPrimer: opts.injectPrimer,
       log: (m) => logs.push(m),
       onToolCall: (c, r) => {

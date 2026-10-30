@@ -9,22 +9,19 @@ import {
   loadSystemPrompt,
   wrapUserTask,
   frameToolResults,
-  donePrompt,
-  continuePrompt,
-  refusalNudge,
-  noToolNudge,
-  driftNudge,
+  DONE_PROMPT,
+  CONTINUE_PROMPT,
+  REFUSAL_NUDGE,
+  NO_TOOL_NUDGE,
+  DRIFT_NUDGE,
+  MISSED_CALL_SUMMARY,
+  MALFORMED_SUMMARY,
   classifyReply,
-  missedCallSummary,
-  malformedSummary,
   malformedDetail,
   reprimePrompt,
-  standbyMessage,
+  STANDBY_MESSAGE,
   idlePrimer,
-  renderRegister,
-  type Persona,
 } from "./prompt.js";
-import { vocabularyFor, type Vocabulary } from "./vocabulary.js";
 import { detectDrift } from "./drift.js";
 
 export interface BridgeOptions {
@@ -46,8 +43,6 @@ export interface BridgeOptions {
   onToolCall?: (call: ToolCall, result?: ToolResult) => void;
   /** Prime a fresh conversation with the protocol before going idle. */
   injectPrimer?: boolean;
-  noCodeInterpreter?: boolean;
-  persona?: Persona;
 }
 
 export interface Bridge {
@@ -57,7 +52,7 @@ export interface Bridge {
   wait(): Promise<void>;
 }
 
-type State = "priming" | "idle" | "working";
+type State = "idle" | "working";
 
 const MAX_NUDGES = 2;
 const MARKER = "[coccopilot]";
@@ -72,15 +67,15 @@ const RULE = "─".repeat(64);
  */
 export function runBridge(opts: BridgeOptions): Bridge {
   const { channel, registry, workspace, policy, maxTurns, maxContinuations, log } = opts;
-  const persona = opts.persona ?? "agent";
-  const vocabulary: Vocabulary = vocabularyFor(persona);
 
-  let state: State = "priming";
+  let state: State = "idle";
   let taskTurns = 0;
   let continuations = 0;
   let nudges = 0;
   let reprimed = false;
   let systemPrompt = "";
+  /** Whitespace-normalized text of the last reply handled, to refuse a repeat. */
+  let lastReply = "";
   let stopped = false;
   let resolveWait: () => void = () => {};
   const waitPromise = new Promise<void>((r) => (resolveWait = r));
@@ -101,15 +96,13 @@ export function runBridge(opts: BridgeOptions): Bridge {
       registry,
       ctx,
       log,
-      vocabulary,
       onToolCall: opts.onToolCall,
     });
-    await post(frameToolResults(results, vocabulary));
+    await post(frameToolResults(results));
   }
 
   /** Compact progress line shown beside the reply input prompt. */
   function statusLine(): string {
-    if (state === "priming") return "priming · waiting for the protocol acknowledgement";
     if (state === "idle") return "idle · waiting for a task";
     return `working · step ${taskTurns + 1}/${maxTurns}`;
   }
@@ -120,7 +113,7 @@ export function runBridge(opts: BridgeOptions): Bridge {
   }
 
   async function handleReply(raw: string): Promise<void> {
-    const parsed = parseAssistant(raw, vocabulary);
+    const parsed = parseAssistant(raw);
     if (parsed.text) log(`copilot: ${truncate(parsed.text, 600)}`);
 
     const executable = parsed.calls.filter((c) => c.tool !== "done");
@@ -131,16 +124,9 @@ export function runBridge(opts: BridgeOptions): Bridge {
       // idle, so correct it regardless of state.
       log(`protocol: ${parsed.parseError}`);
       await post(
-        frameToolResults(
-          [
-            {
-              ok: false,
-              summary: malformedSummary(persona),
-              detail: malformedDetail(persona, parsed.parseError),
-            },
-          ],
-          vocabulary,
-        ),
+        frameToolResults([
+          { ok: false, summary: MALFORMED_SUMMARY, detail: malformedDetail(parsed.parseError) },
+        ]),
       );
       return;
     }
@@ -158,17 +144,6 @@ export function runBridge(opts: BridgeOptions): Bridge {
       await runCalls(executable);
       if (doneCall) finishTask(doneCall.args.summary);
       else await extendIfNeeded();
-      return;
-    }
-
-    if (state === "priming") {
-      if (executable.length === 0) {
-        log("primed: protocol acknowledged; now idle — hand in a task");
-        state = "idle";
-        return;
-      }
-      // Copilot acted on the primer itself; run it and keep waiting for the ack.
-      await runCalls(executable);
       return;
     }
 
@@ -203,16 +178,13 @@ export function runBridge(opts: BridgeOptions): Bridge {
             : `no tool call (${kind}) — nudging (${nudges}/${MAX_NUDGES})`,
       );
       await post(
-        frameToolResults(
-          [
-            {
-              ok: false,
-              summary: missedCallSummary(persona),
-              detail: drifted ? driftNudge(persona) : refusal ? refusalNudge(persona) : noToolNudge(persona),
-            },
-          ],
-          vocabulary,
-        ),
+        frameToolResults([
+          {
+            ok: false,
+            summary: MISSED_CALL_SUMMARY,
+            detail: drifted ? DRIFT_NUDGE : refusal ? REFUSAL_NUDGE : NO_TOOL_NUDGE,
+          },
+        ]),
       );
       return;
     }
@@ -227,12 +199,12 @@ export function runBridge(opts: BridgeOptions): Bridge {
           ? "interpreter drift persisted; re-priming the protocol once"
           : "refusal persisted; re-priming the protocol once",
       );
-      await post(reprimePrompt(systemPrompt, workspace.root, persona));
+      await post(reprimePrompt(systemPrompt, workspace.root));
       return;
     }
 
     log("no tool call after nudges; standing by");
-    await post(standbyMessage(persona));
+    await post(STANDBY_MESSAGE);
     state = "idle";
   }
 
@@ -254,14 +226,14 @@ export function runBridge(opts: BridgeOptions): Bridge {
     if (continuations < maxContinuations) {
       continuations++;
       log(`step budget reached; continuing (${continuations}/${maxContinuations})`);
-      await post(continuePrompt(persona));
+      await post(CONTINUE_PROMPT);
       return;
     }
     // Stay in "working": the model's done block must be handled, and a done emitted
     // while idle would just be left alone. If the model instead keeps working, it is
     // asked for the done block again.
     log(`step budget and continuations exhausted (${maxContinuations}); requesting the done block`);
-    await post(donePrompt(persona));
+    await post(DONE_PROMPT);
   }
 
   function finishTask(summary: unknown): void {
@@ -275,20 +247,14 @@ export function runBridge(opts: BridgeOptions): Bridge {
   }
 
   async function prime(): Promise<void> {
-    // The register is rendered through the active vocabulary, so the notation persona
-    // sees neutral routine names/descriptions instead of internal tool names.
-    systemPrompt = await loadSystemPrompt(renderRegister(vocabulary, registry.all()), {
-      noCodeInterpreter: opts.noCodeInterpreter,
-      persona,
-      interactive: true,
-    });
+    systemPrompt = await loadSystemPrompt(registry.describe());
 
     if (opts.injectPrimer === false) {
       if (opts.task) {
         log("primer disabled; sending only the task (assumes a primed thread)");
         state = "working";
         startTask();
-        await dispatch(wrapUserTask(opts.task, workspace.root, persona));
+        await dispatch(wrapUserTask(opts.task, workspace.root));
       } else {
         log("primer disabled and no task given; starting idle (assumes a primed thread)");
         state = "idle";
@@ -300,13 +266,15 @@ export function runBridge(opts: BridgeOptions): Bridge {
       log("priming session and seeding the first task");
       state = "working";
       startTask();
-      await dispatch(`${systemPrompt}\n\n---\n\n${wrapUserTask(opts.task, workspace.root, persona)}`);
+      await dispatch(`${systemPrompt}\n\n---\n\n${wrapUserTask(opts.task, workspace.root)}`);
       return;
     }
 
-    log("priming session with the tool protocol; then you drive from Copilot");
-    state = "priming";
-    await dispatch(`${systemPrompt}\n\n---\n\n${idlePrimer(workspace.root, persona)}`);
+    // No need to carry Copilot's "Ready" back: go idle at once, so the operator's next
+    // move is typing the first task straight into Copilot.
+    log("priming session with the tool protocol; then type your task into Copilot");
+    state = "idle";
+    await dispatch(`${systemPrompt}\n\n---\n\n${idlePrimer(workspace.root)}`);
   }
 
   async function loop(): Promise<void> {
@@ -319,6 +287,14 @@ export function runBridge(opts: BridgeOptions): Bridge {
           log("no reply received; ending the session");
           break;
         }
+        // Re-running a reply would apply its edits twice — e.g. the operator clicked
+        // Copy on an older message. Skip it and keep waiting for the new one.
+        const fingerprint = reply.replace(/\s+/g, " ").trim();
+        if (fingerprint === lastReply && parseAssistant(reply).calls.length > 0) {
+          log("that is the same reply as last time — it was NOT run again. Copy Copilot's newest reply.");
+          continue;
+        }
+        lastReply = fingerprint;
         await handleReply(reply);
         refreshStatus();
       }

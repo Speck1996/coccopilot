@@ -95,7 +95,7 @@ test("ux: the step budget extends, then forces a done block that is still handle
     maxContinuations: 1,
     replies: [
       call("list_dir", { path: "." }), // step 1 -> budget hit -> continue
-      call("list_dir", { path: "." }), // step 1 again -> budget hit -> continuations exhausted -> done prompt
+      "Once more.\n" + call("list_dir", { path: "." }), // step 1 again -> budget hit -> continuations exhausted -> done prompt
       done("Finished after the budget was exhausted."),
     ],
   });
@@ -106,4 +106,32 @@ test("ux: the step budget extends, then forces a done block that is still handle
     result.logs.some((l) => l.includes("task complete")),
     "the done block after the forced prompt must still close the task",
   );
+});
+
+test("ux: without a task the primer goes idle at once — no acknowledgement to carry back", async () => {
+  const result = await runSession({
+    replies: [call("list_dir", { path: "." }), done("Listed.")],
+  });
+
+  assert.equal(result.outbound.length, 2, "primer, then one result frame");
+  assert.ok(result.toolCalls.some((c) => c.tool === "list_dir"), "the first reply already starts a task");
+  assert.ok(result.logs.some((l) => l.includes("task complete")));
+});
+
+test("ux: the primer fits a single clipboard paste", async () => {
+  const result = await runSession({ replies: [] });
+  assert.ok(result.outbound[0].length <= 8000, `primer is ${result.outbound[0].length} chars`);
+  assert.doesNotMatch(result.outbound[0], /\{\{TOOLS\}\}/);
+});
+
+test("ux: a repeated reply (e.g. copying an older message) is never run twice", async () => {
+  const edit = call("write_file", { path: "once.txt", content: "x\n" });
+  const result = await runSession({
+    task: "Write once.txt.",
+    replies: [edit, edit, done("Wrote it.")],
+  });
+
+  assert.equal(result.toolCalls.filter((c) => c.tool === "write_file").length, 1);
+  assert.ok(result.logs.some((l) => l.includes("NOT run again")));
+  assert.ok(result.logs.some((l) => l.includes("task complete")));
 });

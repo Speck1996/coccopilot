@@ -45,12 +45,27 @@ export class HumanTerminal {
     return this.lines.length > 0;
   }
 
-  /** Resolve with the next line the operator submits. */
-  nextLine(): Promise<string> {
+  /**
+   * Resolve with the next line the operator submits. Aborting `signal` withdraws the
+   * wait (resolving "") so a line typed later is not swallowed by a stale reader.
+   */
+  nextLine(signal?: AbortSignal): Promise<string> {
     const queued = this.lines.shift();
     if (queued !== undefined) return Promise.resolve(queued);
-    if (this.closed) return Promise.resolve("");
-    return new Promise<string>((resolve) => this.waiters.push(resolve));
+    if (this.closed || signal?.aborted) return Promise.resolve("");
+    return new Promise<string>((resolve) => {
+      const onAbort = () => {
+        const i = this.waiters.indexOf(waiter);
+        if (i >= 0) this.waiters.splice(i, 1);
+        resolve("");
+      };
+      const waiter = (line: string) => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(line);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.waiters.push(waiter);
+    });
   }
 
   /**
@@ -73,6 +88,11 @@ export class HumanTerminal {
 
   write(message: string): void {
     this.output.write(message.endsWith("\n") ? message : `${message}\n`);
+  }
+
+  /** Ring the terminal bell so the operator notices a hand-off is ready. TTY only. */
+  bell(): void {
+    if ((this.output as NodeJS.WriteStream).isTTY) this.output.write("\x07");
   }
 
   close(): void {

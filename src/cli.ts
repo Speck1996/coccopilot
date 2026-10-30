@@ -20,9 +20,8 @@ interface CliArgs {
   yes: boolean;
   continueSession: boolean;
   dryRun: boolean;
-  noCodeInterpreter: boolean;
-  persona: "agent" | "notation";
   injectPrimer: boolean;
+  watch: boolean;
   clipboard: boolean;
   cache: boolean;
   cachePath?: string;
@@ -39,9 +38,8 @@ function parseArgs(argv: string[]): CliArgs {
   let yes = false;
   let continueSession = false;
   let dryRun = false;
-  let noCodeInterpreter = false;
-  let persona: CliArgs["persona"] = "agent";
   let injectPrimer = true;
+  let watch = true;
   let clipboard = true;
   let cache = true;
   let cachePath: string | undefined;
@@ -55,13 +53,12 @@ function parseArgs(argv: string[]): CliArgs {
     else if (arg === "--continuations") maxContinuations = Number(argv[++i]);
     else if (arg === "--max-message-chars") maxMessageChars = Number(argv[++i]);
     else if (arg === "--dry-run") dryRun = true;
-    else if (arg === "--no-code-interpreter") noCodeInterpreter = true;
     else if (arg === "--no-primer") injectPrimer = false;
     else if (arg === "--no-clipboard") clipboard = false;
+    else if (arg === "--no-watch") watch = false;
     else if (arg === "--no-cache") cache = false;
     else if (arg === "--cache-path") cachePath = argv[++i];
     else if (arg === "--sentinel") sentinel = argv[++i];
-    else if (arg === "--persona") persona = argv[++i] as CliArgs["persona"];
     else if (arg === "--yes" || arg === "-y") yes = true;
     else if (arg === "--continue" || arg === "-c") continueSession = true;
     else if (arg === "--help" || arg === "-h") {
@@ -82,9 +79,8 @@ function parseArgs(argv: string[]): CliArgs {
     yes,
     continueSession,
     dryRun,
-    noCodeInterpreter,
-    persona,
     injectPrimer,
+    watch,
     clipboard,
     cache,
     cachePath,
@@ -109,14 +105,13 @@ function printUsage(): void {
       "  --no-cache             do not use the cache markdown file; use clipboard/manual hand-off",
       "  --cache-path <path>    cache markdown path (default: <workspace>/.coccopilot/cache.md)",
       "  --no-clipboard         do not copy outgoing frames to the system clipboard",
+      "  --no-watch             do not auto-take Copilot's reply when it is copied; press Enter instead",
       "  --sentinel <text>      line that ends a manual paste (default: " + DEFAULT_SENTINEL + ")",
       "  --max-turns <n>        steps per continuation (default: 25)",
       "  --continuations <n>    times the step budget may be extended before sealing (default: 5)",
       "  --max-message-chars <n> clipboard cap: split (clipboard mode) or skip the copy (cache mode) above n chars (default: 8000, 0 disables)",
       "  --dry-run              probe the clipboard and print the hand-off mode; send nothing",
-      "  --no-code-interpreter  add prompt framing forbidding the built-in Code Interpreter",
       "  --no-primer            skip priming (assumes the thread already has the protocol)",
-      "  --persona <name>       agent | notation (default: agent)",
       "  -y, --yes              auto-approve non-routine shell commands",
       "  -c, --continue         continue the previous conversation instead of priming fresh",
       "  -h, --help             show this help",
@@ -212,7 +207,9 @@ async function runDryRun(config: Config, log: (msg: string) => void): Promise<vo
   log(`dry-run: workspace    — ${config.workspace}`);
   log(`dry-run: outbound     — ${outbound}`);
   log(`dry-run: clipboard    — ${clipboardNote}`);
-  log(`dry-run: reply input  — terminal paste (sentinel ${config.sentinel})`);
+  log(
+    `dry-run: reply input  — ${config.watch && clipboard ? "auto from clipboard when copied, or " : ""}terminal paste (sentinel ${config.sentinel})`,
+  );
   if (!clipboard && config.clipboard) {
     log("dry-run: INFO install a clipboard tool (wl-clipboard, xclip, or xsel on Linux) to enable clipboard mode");
   }
@@ -329,9 +326,8 @@ async function main(): Promise<void> {
     maxMessageChars: args.maxMessageChars,
     autoApprove: args.yes,
     continueSession: args.continueSession,
-    noCodeInterpreter: args.noCodeInterpreter,
-    persona: args.persona,
     clipboard: args.clipboard,
+    watch: args.watch && args.clipboard,
     cache: args.cache,
     cachePath: args.cachePath,
     sentinel: args.sentinel,
@@ -361,6 +357,7 @@ async function main(): Promise<void> {
     cachePath: config.cachePath,
     workspaceRoot: config.workspace,
     maxMessageChars: config.maxMessageChars,
+    watch: config.watch,
     terminal,
     log,
   });
@@ -389,8 +386,6 @@ async function main(): Promise<void> {
       approver,
       maxTurns: config.maxTurns,
       maxContinuations: config.maxContinuations,
-      noCodeInterpreter: config.noCodeInterpreter,
-      persona: config.persona,
       injectPrimer: args.injectPrimer && !config.continueSession,
       log,
     });

@@ -27,10 +27,11 @@ export interface Config {
   autoApprove: boolean;
   /** Continue the previous conversation instead of prime framing. */
   continueSession: boolean;
-  /** Add prompt framing that discourages the built-in Code Interpreter. */
-  noCodeInterpreter: boolean;
-  /** System prompt framing: direct `agent`, or the no-capability `notation` form. */
-  persona: "agent" | "notation";
+  /**
+   * Watch the clipboard while waiting for a reply and take Copilot's reply as soon as
+   * it is copied, so a turn needs no terminal interaction.
+   */
+  watch: boolean;
 }
 
 function bool(v: string | undefined, fallback: boolean): boolean {
@@ -79,7 +80,6 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     maxContinuations: overrides.maxContinuations ?? num(env.COCCOPILOT_MAX_CONTINUATIONS, 5),
     autoApprove: overrides.autoApprove ?? bool(env.COCCOPILOT_YES, false),
     continueSession: overrides.continueSession ?? bool(env.COCCOPILOT_CONTINUE, false),
-    noCodeInterpreter: overrides.noCodeInterpreter ?? bool(env.COCCOPILOT_NO_CODE_INTERPRETER, false),
-    persona: overrides.persona ?? ((env.COCCOPILOT_PERSONA as Config["persona"]) || "agent"),
+    watch: overrides.watch ?? bool(env.COCCOPILOT_WATCH, true),
   };
 }

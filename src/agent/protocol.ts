@@ -1,5 +1,4 @@
 import type { ToolCall } from "../tools/types.js";
-import { agentVocabulary, type Vocabulary } from "./vocabulary.js";
 
 export interface ParsedAssistant {
   /** Assistant prose with the tool block removed. */
@@ -43,7 +42,7 @@ const FENCE_RE = /```[ \t]*([a-z0-9_.+-]*)[ \t]*\r?\n?([\s\S]*?)```/gi;
  * whose call key is present. The bare pass is deliberately narrow: an object that
  * merely contains `{`/`}` in prose must not be mistaken for a tool call.
  */
-export function parseAssistant(raw: string, vocabulary: Vocabulary = agentVocabulary): ParsedAssistant {
+export function parseAssistant(raw: string): ParsedAssistant {
   const text = raw ?? "";
   const calls: ToolCall[] = [];
   let parseError: string | undefined;
@@ -60,15 +59,14 @@ export function parseAssistant(raw: string, vocabulary: Vocabulary = agentVocabu
     const values = tryParseJsonValues(body);
     if (values.length === 0) {
       // A coccopilot/json block that won't parse is a protocol error worth reporting.
-      const key = escapeForRegex(vocabulary.callKey);
-      if (lang === "coccopilot" || new RegExp(`"(tool|name|tool_name|${key})"\\s*:`).test(body)) {
+      if (lang === "coccopilot" || /"(tool|name|tool_name)"\s*:/.test(body)) {
         parseError = `could not parse JSON in fenced block: ${body.slice(0, 200)}`;
         rawBlock = body;
       }
       continue;
     }
 
-    const extracted = values.flatMap((v) => extractCalls(v, vocabulary));
+    const extracted = values.flatMap((v) => extractCalls(v));
     if (extracted.length > 0) {
       calls.push(...extracted);
       rawBlock = body;
@@ -80,7 +78,7 @@ export function parseAssistant(raw: string, vocabulary: Vocabulary = agentVocabu
   // Fall back to an unfenced call object. Only run when the fenced pass found nothing,
   // so a normal reply can never be reinterpreted by this looser path.
   if (calls.length === 0) {
-    const bare = scanBareCalls(text, vocabulary);
+    const bare = scanBareCalls(text);
     if (bare) {
       if (bare.calls.length > 0) {
         calls.push(...bare.calls);
@@ -118,15 +116,14 @@ interface BareScan {
 
 /**
  * Look for a tool call emitted without a fence: a brace-balanced JSON object that
- * carries the vocabulary's call key (or the legacy `tool`/`tool_name` keys). We only
+ * carries a call key (`tool`, `tool_name` or `name`). We only
  * treat the object as a call when it actually resolves to one, so incidental braces
  * in prose are ignored. An object that names a routine but is not valid JSON is
  * reported as a parse error rather than silently becoming prose.
  */
-function scanBareCalls(text: string, vocabulary: Vocabulary): BareScan | undefined {
-  const key = escapeForRegex(vocabulary.callKey);
+function scanBareCalls(text: string): BareScan | undefined {
   // Object-key shaped: quoted or unquoted, at the start of the object or after a comma.
-  const gate = new RegExp(`(?:^|[{,\\s])["']?(?:tool|tool_name|name|${key})["']?\\s*:`);
+  const gate = /(?:^|[{,\s])["']?(?:tool|tool_name|name)["']?\s*:/;
   const calls: ToolCall[] = [];
   const spans: Array<[number, number]> = [];
   let raw: string | undefined;
@@ -144,7 +141,7 @@ function scanBareCalls(text: string, vocabulary: Vocabulary): BareScan | undefin
       }
       continue;
     }
-    const extracted = extractCalls(parsed, vocabulary);
+    const extracted = extractCalls(parsed);
     if (extracted.length > 0) {
       calls.push(...extracted);
       spans.push([start, end]);
@@ -277,81 +274,44 @@ function jsonValueSpans(text: string): string[] {
 }
 
 /** Accept a single call object, an array of calls, or `{ tools: [...] }`. */
-function extractCalls(value: unknown, vocabulary: Vocabulary): ToolCall[] {
+function extractCalls(value: unknown): ToolCall[] {
   if (Array.isArray(value)) {
-    return value.map((v) => normalizeCall(v, vocabulary)).filter((c): c is ToolCall => c !== undefined);
+    return value.map((v) => normalizeCall(v)).filter((c): c is ToolCall => c !== undefined);
   }
   if (value && typeof value === "object") {
     const obj = value as Record<string, unknown>;
     if (Array.isArray(obj.tools)) {
-      return obj.tools.map((v) => normalizeCall(v, vocabulary)).filter((c): c is ToolCall => c !== undefined);
+      return obj.tools.map((v) => normalizeCall(v)).filter((c): c is ToolCall => c !== undefined);
     }
   }
-  const single = normalizeCall(value, vocabulary);
+  const single = normalizeCall(value);
   return single ? [single] : [];
 }
 
 /**
  * Accept a few shapes the model might produce:
- *   { "tool": "x", "args": {...} }        (agent)
- *   { "step": "survey", "args": {...} }   (notation)
+ *   { "tool": "x", "args": {...} }
  *   { "name": "x", "arguments": {...} }   (tolerant)
  *   { "tool": "x", "path": "...", ... }   (args inline)
- *
- * The routine name is read from the active vocabulary's key first, then from the
- * legacy keys, and mapped back to the internal tool name. Argument names are mapped
- * from the vocabulary back to internal names (identity for the agent persona).
  */
-function normalizeCall(value: unknown, vocabulary: Vocabulary): ToolCall | undefined {
+function normalizeCall(value: unknown): ToolCall | undefined {
   if (!value || typeof value !== "object") return undefined;
   const obj = value as Record<string, unknown>;
 
-  const rawName = obj[vocabulary.callKey] ?? obj.tool ?? obj.name ?? obj.tool_name;
-  if (typeof rawName !== "string" || rawName.length === 0) return undefined;
-  const internal = vocabulary.internalFor(rawName);
+  const name = obj.tool ?? obj.name ?? obj.tool_name;
+  if (typeof name !== "string" || name.length === 0) return undefined;
 
   let args: Record<string, unknown> = {};
-  const argsCandidate = obj[vocabulary.argsKey] ?? obj.args ?? obj.arguments ?? obj.parameters ?? obj.input;
+  const argsCandidate = obj.args ?? obj.arguments ?? obj.parameters ?? obj.input;
   if (argsCandidate && typeof argsCandidate === "object" && !Array.isArray(argsCandidate)) {
     args = argsCandidate as Record<string, unknown>;
   } else {
     // Inline args: everything except the reserved keys.
-    const reserved = new Set([
-      vocabulary.callKey,
-      vocabulary.argsKey,
-      "tool",
-      "name",
-      "tool_name",
-      "args",
-      "arguments",
-      "parameters",
-      "input",
-      "done",
-      "summary",
-    ]);
+    const reserved = new Set(["tool", "name", "tool_name", "args", "arguments", "parameters", "input", "done", "summary"]);
     for (const [k, v] of Object.entries(obj)) {
       if (!reserved.has(k)) args[k] = v;
     }
   }
 
-  args = mapArgsToInternal(internal, args, vocabulary);
-  return { tool: internal, args };
-}
-
-/** Map model-facing argument names back to internal ones for a routine. */
-function mapArgsToInternal(
-  internal: string,
-  args: Record<string, unknown>,
-  vocabulary: Vocabulary,
-): Record<string, unknown> {
-  const mapped: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args)) {
-    const internalKey = vocabulary.argToInternal(internal, key) ?? key;
-    mapped[internalKey] = value;
-  }
-  return mapped;
-}
-
-function escapeForRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return { tool: name, args };
 }

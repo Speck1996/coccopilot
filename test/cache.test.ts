@@ -7,14 +7,14 @@ import { join } from "node:path";
 import { createChannel } from "../src/human/channel.js";
 import { HumanTerminal } from "../src/human/terminal.js";
 import { resolveCachePath, writeCache, readCache } from "../src/human/cache.js";
-import type { Clipboard } from "../src/human/clipboard.js";
+import { guardClipboard, looksLikeToolReply, type Clipboard } from "../src/human/clipboard.js";
 
 /** Clipboard stub whose reads are returned from a queue, in order. */
 class StubClipboard implements Clipboard {
   readonly description = "stub";
   writes: string[] = [];
   readsUsed = 0;
-  constructor(private reads: string[]) {}
+  constructor(public reads: string[]) {}
   async read(): Promise<string> {
     this.readsUsed++;
     return this.reads.shift() ?? "";
@@ -94,7 +94,7 @@ test("cache: an under-cap frame is written to the file and copied to the clipboa
   }
 });
 
-test("cache: an over-cap frame is written to the file but never copied", async () => {
+test("cache: an over-cap frame is written to the file; only its path is copied", async () => {
   const dir = await tempDir();
   const { terminal, rendered } = makeTerminal();
   const clipboard = new StubClipboard([]);
@@ -114,7 +114,7 @@ test("cache: an over-cap frame is written to the file but never copied", async (
     await channel.send(payload);
 
     assert.match(await readCache(cacheFile), /TOOL RESULT \(ok\)/);
-    assert.deepEqual(clipboard.writes, [], "an oversized frame must not touch the clipboard");
+    assert.deepEqual(clipboard.writes, [cacheFile], "only the path goes on the clipboard, for the attach dialog");
     assert.match(rendered(), /too large for the composer/);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -197,4 +197,55 @@ test("cache: a bare Enter reads the clipboard, with guards", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("watch: a reply copied to the clipboard is taken without touching the terminal", async () => {
+  const dir = await tempDir();
+  const { input, terminal, rendered } = makeTerminal();
+  const reply = '```coccopilot\n{ "tool": "list_dir", "args": { "path": "." } }\n```';
+  // Baseline (our own frame), an unrelated copy, then Copilot's reply.
+  // A reply is only taken once it has stayed on the clipboard for a couple of polls.
+  const clipboard = new StubClipboard(["[coccopilot] TOOL RESULT (ok): x", "some unrelated text", reply, reply, reply]);
+  try {
+    const { channel, description } = await createChannel({
+      webappUrl: "https://example.test",
+      cache: true,
+      cachePath: resolveCachePath(dir),
+      clipboard,
+      sentinel: "END",
+      watch: true,
+      watchIntervalMs: 1,
+      terminal,
+      log: () => {},
+    });
+    assert.match(description, /auto-reads/);
+    assert.equal(await channel.receive(), reply);
+    assert.match(rendered(), /picked up Copilot's reply/);
+
+    // The withdrawn terminal wait must not swallow the next line typed.
+    input.write("typed\nEND\n");
+    clipboard.reads.push("typed"); // keep the watcher's baseline quiet
+    assert.equal(await channel.receive(), "typed");
+  } finally {
+    terminal.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("watch: coccopilot's own hand-offs are never mistaken for a reply", () => {
+  assert.ok(looksLikeToolReply('Sure.\n```coccopilot\n{ "tool": "read_file", "args": {} }\n```'));
+  assert.ok(looksLikeToolReply('{ "tool": "grep", "args": { "pattern": "x" } }'));
+  assert.ok(!looksLikeToolReply("[coccopilot] I'm working on a project...\n```coccopilot\n{}\n```"));
+  assert.ok(!looksLikeToolReply("<!-- coccopilot cache · 10 chars -->\n```coccopilot\n{}\n```"));
+  assert.ok(!looksLikeToolReply("Ready"));
+});
+
+test("watch: a second Copy-button write over the results is undone", async () => {
+  const reply = '```coccopilot\n{ "tool": "list_dir", "args": { "path": "." } }\n```';
+  const results = "[coccopilot] TOOL RESULT (ok): listed";
+  const clipboard = new StubClipboard([results, reply]);
+  let restored = 0;
+  await guardClipboard(clipboard, results, () => restored++, 30, 1);
+  assert.equal(restored, 1, "the stale reply is replaced once");
+  assert.deepEqual(clipboard.writes, [results]);
 });

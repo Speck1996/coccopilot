@@ -8,8 +8,6 @@
 
 ## Backlog
 
-- **Cache auto-watch.** Optionally fs-watch the cache file and consume a reply as soon
-  as it is saved, in addition to the terminal/sentinel and bare-Enter clipboard paths.
 - **Attach-aware framing.** Once Copilot reliably reads an attached `cache.md`, consider
   dropping the clipboard copy entirely.
 
@@ -31,8 +29,8 @@
 - **Drift detection coverage.** `detectDrift` matches narration and markers
   (`/mnt/data`, "code interpreter", `bash -lc`, "Coding and executing"). Add patterns as
   Copilot's progress wording changes.
-- **Per-persona vocabulary tuning.** If refusals recur, extend the neutral labels/arg
-  names and the `scrub` rules in `src/agent/vocabulary.ts`.
+- **Prompt tuning.** If refusals recur, adjust the wording of `prompts/agent.md` and the
+  nudges in `src/agent/prompt.ts` (keep them in the operator's plain voice).
 - **`ensure_tool` virtualenv awareness.** The catalog installs to the user site
   (`pip install --user`); detect and use an active virtualenv when present.
 - **Terminal status line.** Surface task state / turn counts so long tasks are easier to
@@ -41,6 +39,19 @@
   driver to exercise the bridge deterministically in CI without a browser.
 
 ## Done
+
+- **Clipboard watch + single prompt.** While waiting for a reply, coccopilot polls the
+  clipboard and takes Copilot's reply as soon as it is copied (when it holds a
+  `coccopilot` block), so a turn is copy → paste → send with no terminal step; a bell
+  marks new results. Oversized frames put the cache file's path on the clipboard for the
+  attach dialog. The primer no longer waits for Copilot's "Ready" to be carried back.
+  The `agent`/`notation` personas and `--no-code-interpreter` were replaced by one
+  ~5k-char prompt in the operator's voice that fits a single paste.
+- **M365 Copilot trial fixes.** An end-to-end trial on Microsoft 365 Copilot surfaced a
+  Copy button that can write the clipboard twice, which re-ran a reply and overwrote the
+  results. The bridge now refuses to re-run an identical reply, the watcher waits for a
+  copied reply to settle, and the results are restored if a stale reply lands on top.
+  The prompt now asks for every needed file to be read in one reply.
 
 - **Cache markdown transport.** Outgoing frames are written to
   `<workspace>/.coccopilot/cache.md` (overwritten each turn, atomic, gitignored) instead

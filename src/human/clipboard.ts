@@ -132,3 +132,88 @@ export async function detectClipboard(log?: (msg: string) => void): Promise<Clip
 export function normalizeClipboard(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\s+$/, "").trim();
 }
+
+/**
+ * True when clipboard text looks like a Copilot reply that carries a coccopilot call.
+ * coccopilot's own hand-offs (prefixed `[coccopilot]`, or the cache file with its
+ * header comment) are never mistaken for one, even though they quote example blocks.
+ */
+export function looksLikeToolReply(text: string): boolean {
+  const head = text.trimStart();
+  if (head.startsWith("[coccopilot]") || head.startsWith("<!-- coccopilot cache")) return false;
+  return /```[ \t]*coccopilot/i.test(text) || /["']?tool["']?\s*:\s*["']/.test(text);
+}
+
+/** Default interval between clipboard polls while watching for a reply. */
+export const WATCH_INTERVAL_MS = 600;
+
+/**
+ * Poll the clipboard until it changes to something that looks like a Copilot reply
+ * with a coccopilot call, and resolve with it. Whatever is on the clipboard when the
+ * watch starts is the baseline, so a stale reply is never taken twice. A candidate is
+ * only taken once it has stayed put for two polls: some Copy buttons (M365 Copilot)
+ * write the clipboard more than once, and acting on the first write lets the second
+ * one land on top of the results. Resolves undefined once `signal` aborts. Read
+ * failures are skipped, not fatal: the operator can still paste into the terminal.
+ */
+export async function watchClipboard(
+  clipboard: Clipboard,
+  signal: AbortSignal,
+  intervalMs = WATCH_INTERVAL_MS,
+): Promise<string | undefined> {
+  const read = () => clipboard.read().then(normalizeClipboard, () => undefined);
+  let baseline = await read();
+  let candidate: string | undefined;
+  let steadyPolls = 0;
+  while (!signal.aborted) {
+    await sleep(intervalMs, signal);
+    if (signal.aborted) return undefined;
+    const text = await read();
+    if (text === undefined) continue;
+    if (candidate !== undefined && text === candidate) {
+      if (++steadyPolls >= 2) return candidate;
+      continue;
+    }
+    if (text === baseline) continue;
+    baseline = text;
+    candidate = looksLikeToolReply(text) ? text : undefined;
+    steadyPolls = 0;
+  }
+  return undefined;
+}
+
+/**
+ * For a few seconds after a hand-off, put `text` back if something that looks like a
+ * Copilot reply overwrites it — a late second write from a Copy button would otherwise
+ * make the operator paste Copilot's own reply instead of the results. No operator can
+ * paste, send, and copy a new reply that fast, so nothing legitimate is undone.
+ */
+export async function guardClipboard(
+  clipboard: Clipboard,
+  text: string,
+  onRestore: () => void,
+  windowMs = 4000,
+  intervalMs = 250,
+): Promise<void> {
+  const wanted = normalizeClipboard(text);
+  const until = Date.now() + windowMs;
+  while (Date.now() < until) {
+    await sleep(intervalMs);
+    const now = await clipboard.read().then(normalizeClipboard, () => undefined);
+    if (now === undefined || now === wanted || !looksLikeToolReply(now)) continue;
+    await clipboard.write(text).catch(() => undefined);
+    onRestore();
+  }
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}

@@ -17,22 +17,23 @@ Copilot's internal transport. You stay a real human user of the product.
 ```
 $ coccopilot --cwd /path/to/project
 [coccopilot] webapp:    https://copilot.microsoft.com/
-[coccopilot] reply input: cache file (/path/to/project/.coccopilot/cache.md), clipboard copy when ≤ 8000 chars
-[coccopilot] results written to /path/to/project/.coccopilot/cache.md (7754 chars).
-[coccopilot] too large for the composer — attach or open the cache file instead.
+[coccopilot] reply input: cache file (/path/to/project/.coccopilot/cache.md), clipboard copy when ≤ 8000 chars, auto-reads Copilot's reply when you copy it
+[coccopilot] results written to /path/to/project/.coccopilot/cache.md (4877 chars).
+[coccopilot] also copied to your clipboard (fits the paste limit).
 
   1. Open the Copilot webapp:  https://copilot.microsoft.com/
-  2. Attach the cache file (or copy its contents) and send it.
-  3. Copy/select Copilot's full reply.
+  2. Paste the copied results into the composer and send.
+  3. Click the copy button on Copilot's reply — coccopilot picks it up on its own.
 ────────────────────────────────────────────────────────────────
-[coccopilot] [working · step 1/25] Paste Copilot's reply below; finish with a line containing only <<<END>>>.
+[coccopilot] [idle · waiting for a task] Waiting for Copilot's reply — copy it and coccopilot takes it from the clipboard.
 
-# ... you paste Copilot's reply into the terminal, then press Enter
+# ... you type your task into Copilot, then click "copy" on its reply
+[coccopilot] picked up Copilot's reply from the clipboard (412 chars).
 [coccopilot] copilot: I'll start by surveying the workspace...
 [coccopilot] tool: list_dir {"path":"."}
 [coccopilot] result: ok — listed 12 entries in .
-# ... cache.md now holds the TOOL RESULT; hand it to Copilot, paste the next reply
-# ... repeat until Copilot emits the done block; then the session goes idle
+# ... the TOOL RESULT is now on your clipboard (bell rings): paste it into Copilot, send,
+# ... copy the next reply. Repeat until Copilot emits the done block.
 ```
 
 Pass an optional first task to seed the session in one shot:
@@ -47,11 +48,12 @@ coccopilot --cwd /path/to/project "run the tests and fix any failures"
    to the **cache markdown file** (`.coccopilot/cache.md` in the workspace) with paste/attach
    instructions. If it fits under `--max-message-chars`, it is also copied to your clipboard.
 2. You hand the content to a Copilot chat — paste the copied text, or attach/open the cache
-   file — and send.
+   file — and send. coccopilot goes idle right away; type your task straight into Copilot.
 3. Copilot replies with fenced `coccopilot` blocks containing tool calls. It may batch
    **several tool calls in one message**; coccopilot parses all of them.
-4. You paste Copilot's reply into coccopilot's terminal, terminated by the sentinel line.
-   (Or, if you copied it, press Enter to read the clipboard.)
+4. You click Copilot's copy button on the reply. coccopilot is watching the clipboard and
+   takes it as soon as it contains a `coccopilot` block — no terminal step. (You can also
+   paste it into the terminal with the sentinel line, or press Enter to read the clipboard.)
 5. coccopilot parses the blocks, runs the tools locally, and writes the framed `TOOL RESULT`
    frame — one frame for the whole batch — back to the cache file.
 6. You hand that frame to Copilot; it acts again. Repeat until it emits `done`.
@@ -72,10 +74,48 @@ paste limit — a batched `TOOL RESULT` frame carrying whole files arrives intac
 - **Clipboard fast path:** when the frame fits under `--max-message-chars` and a clipboard
   backend is present, coccopilot also copies it, so a small turn is still a direct paste.
   Over the cap, the clipboard is left alone and the file is the only route.
-- **Inbound:** paste Copilot's reply into the terminal and end it with `--sentinel`
-  (`<<<END>>>`). A bare Enter reads the clipboard instead, when one is available.
+- **Inbound:** copy Copilot's reply and coccopilot picks it up from the clipboard on its own
+  (see *Clipboard watch* below). Or paste it into the terminal and end it with `--sentinel`
+  (`<<<END>>>`); a bare Enter reads the clipboard.
+- **Oversized frames:** when a frame is over the paste cap, coccopilot puts the cache
+  file's **path** on the clipboard instead, ready for the browser's attach dialog
+  (Cmd+Shift+G on macOS, the address bar on Windows).
+
+### Clipboard watch
+
+While waiting for a reply, coccopilot polls the clipboard. When it changes to text that
+contains a `coccopilot` block (or a bare `{"tool": …}` object), coccopilot takes it as the
+reply. A normal turn is therefore: **copy Copilot's reply → paste the results → send**,
+without switching to the terminal. A bell rings each time new results are ready.
+
+- Whatever is on the clipboard when the wait starts is ignored, and coccopilot's own
+  hand-offs (`[coccopilot] …`, the cache file) are ignored too.
+- **A reply is never run twice.** If the reply that arrives is identical to the last one
+  that ran (e.g. Copy was clicked on an older message), coccopilot logs it, runs nothing,
+  and keeps waiting for the newest reply.
+- **Double clipboard writes are absorbed.** Some Copy buttons (M365 Copilot) write the
+  clipboard more than once. coccopilot only takes a reply once it has stayed on the
+  clipboard for about a second, and for a few seconds after a hand-off it puts the
+  results back if a stale reply lands on top of them — so you always paste the results,
+  not Copilot's own reply.
+- Replies without a block (e.g. Copilot asking a question) are not auto-taken — press
+  Enter to submit them from the clipboard.
+- Turn it off with `--no-watch` / `COCCOPILOT_WATCH=false`. It is off when there is no
+  clipboard backend or with `--no-clipboard`.
 
 Disable the cache to return to the clipboard/manual hand-off with `--no-cache`.
+
+### Microsoft 365 Copilot (enterprise)
+
+Point the hand-off at the M365 Copilot Chat webapp:
+
+```bash
+coccopilot --webapp https://m365.cloud.microsoft/chat --cwd ./myapp "your task"
+```
+
+It has been trialled end to end: it follows the prompt without refusing, batches several
+calls per reply, and finishes with `done`. Use the **Copy** button under the whole message
+(not a code block's), click it once, and start each task in a new chat.
 
 ### Why human-in-the-loop
 
@@ -146,14 +186,13 @@ you.
 | `--no-cache` | Do not use the cache markdown file; hand off via the clipboard or manual paste. |
 | `--cache-path <path>` | Cache markdown path. Default: `<workspace>/.coccopilot/cache.md`. |
 | `--no-clipboard` | Never touch the system clipboard (cache file only). |
+| `--no-watch` | Don't auto-take Copilot's reply from the clipboard; press Enter or paste instead. |
 | `--sentinel <text>` | Line that ends a manual paste. Default: `<<<END>>>`. |
 | `--max-turns <n>` | Steps per continuation. Default: `25`. |
 | `--continuations <n>` | Times the step budget may be extended before sealing. Default: `5`. |
 | `--max-message-chars <n>` | Clipboard cap: in cached mode, frames above `n` chars skip the clipboard copy; in `--no-cache` clipboard mode they are split into numbered parts. Default: `8000`; `0` disables. |
-| `--persona <name>` | `agent` (default) or `notation` (refusal-resistant work-order framing). |
 | `--no-primer` | Skip priming. Use when the thread already contains the protocol (pair with `-c`). |
 | `--dry-run` | Detect the clipboard backend and print the hand-off mode; send nothing. |
-| `--no-code-interpreter` | Add prompt framing that explicitly forbids the product's built-in Code Interpreter. |
 | `-y`, `--yes` | Auto-approve non-routine shell commands (no approval prompt at all). |
 | `-c`, `--continue` | Continue the previous conversation instead of priming fresh. |
 | `-h`, `--help` | Show usage. |
@@ -265,23 +304,15 @@ Installs run through the same command policy as `run_command`: routine package m
 (`pip`, `npm`) run directly; system installs (e.g. `brew`, `sudo apt-get`) require
 approval (or are auto-approved with `-y`). The deny-list still applies.
 
-## Prompt personas (avoiding "tools not available" refusals)
+## The prompt (avoiding "tools not available" refusals)
 
-Copilot will sometimes refuse the protocol outright — *"those tools are not available in
-this chat"* — when the prompt claims you **are** an agent that runs commands and reads
-files. coccopilot ships two framings:
-
-| Persona | Framing | When to use |
-| --- | --- | --- |
-| `agent` (default) | Copilot is told it is a coding agent with real, orchestrator-backed tools. | Usually fine. |
-| `notation` | Copilot is told it is a **duty clerk at the Engineering Registry** completing an **engineering work order** (a fill-in-the-blank form); a **Registrar** carries out each named routine against the real codebase and returns a **report**. The clerk only fills in the form, so it never claims a capability and has nothing to refuse. | When refusals appear. |
-
-Enable it with `--persona notation` or `COCCOPILOT_PERSONA=notation`. It is opt-in;
-`agent` remains the default. The notation persona also scrubs coccopilot's internal
-vocabulary from what the model reads (call key `step`, routines `survey`/`locate`/
-`seek`/`inspect`/`record`/`amend`/`perform`/`procure`/`close`, result header
-`DESK REPORT`). Result **details are never rewritten** — real file contents and command
-output reach the model verbatim.
+coccopilot sends one prompt, `prompts/agent.md`, written in your own voice. It does not
+tell Copilot that it *has* tools — that claim is what triggers refusals. It says the true
+thing instead: a local program reads the `coccopilot` blocks Copilot writes, runs them in
+your project, and you paste the results back. Writing a block is like suggesting a
+terminal command, so there is no capability to refuse. The prompt also asks Copilot not to
+use its built-in Code Interpreter, and to batch every independent call into one reply.
+It is ~5k characters, so it fits a single clipboard paste.
 
 ## Shell command safety
 
@@ -322,14 +353,13 @@ Environment variables (flags take precedence):
 | `COCCOPILOT_CACHE` | `true` | Use the cache markdown file as the primary transport |
 | `COCCOPILOT_CACHE_PATH` | `<workspace>/.coccopilot/cache.md` | Cache markdown path |
 | `COCCOPILOT_CLIPBOARD` | `true` | Also copy small frames to the system clipboard |
+| `COCCOPILOT_WATCH` | `true` | Auto-take Copilot's reply when it is copied to the clipboard |
 | `COCCOPILOT_SENTINEL` | `<<<END>>>` | Manual-paste terminator |
 | `COCCOPILOT_MAX_TURNS` | `25` | Steps per continuation |
 | `COCCOPILOT_MAX_CONTINUATIONS` | `5` | Times the step budget may be extended before sealing |
 | `COCCOPILOT_MAX_MESSAGE_CHARS` | `8000` | Clipboard cap: skip the copy (cache mode) or split into parts (`--no-cache`) above this (`0` disables) |
 | `COCCOPILOT_YES` | `false` | Auto-approve shell commands |
 | `COCCOPILOT_CONTINUE` | `false` | Continue the previous conversation |
-| `COCCOPILOT_PERSONA` | `agent` | `agent` or `notation` framing |
-| `COCCOPILOT_NO_CODE_INTERPRETER` | `false` | Add Code Interpreter-forbidding framing |
 
 `coccopilot doctor` and `coccopilot install <tool>` are also available as subcommands;
 they honor `-y` for installs that require approval.
@@ -351,7 +381,6 @@ src/
     executor.ts          shared tool-call execution/framing
     protocol.ts          tool-call parsing (single, batched, tolerant)
     prompt.ts            system prompt assembly + result framing
-    vocabulary.ts        persona-aware call key / routine labels / arg names / scrub
     drift.ts             detects built-in sandbox/interpreter drift in a reply
   tools/
     fs.ts                read/write/edit/list/glob/grep
@@ -363,8 +392,7 @@ src/
   sandbox/
     workspace.ts         path confinement
     policy.ts            command deny-list + approval
-prompts/agent.md         the system prompt sent to Copilot (agent persona)
-prompts/agent-notation.md the refusal-resistant Engineering-Registry work-order persona
+prompts/agent.md         the single prompt sent to Copilot
 test/
   scenarios.test.ts      explain / create-project / refactor task simulations
   ux.test.ts             nudge, malformed-block, refusal, drift, budget-recovery simulations
@@ -384,12 +412,13 @@ test/
 - **Pasting the copy is blocked by the composer** — the frame is over your paste limit.
   Just attach/open `.coccopilot/cache.md` instead; coccopilot already skipped the
   clipboard copy for it. To raise the copy cap, increase `--max-message-chars`.
-- **"tools are not available" refusal** — Copilot is rejecting the framing. Run with
-  `--persona notation`; the form-filling framing claims no capability, so there is
-  nothing to refuse. The bridge also auto-recovers with a nudge and a re-prime.
+- **"tools are not available" refusal** — the bridge auto-recovers with a plain-language
+  nudge and, if needed, a re-prime. If it persists, start a fresh Copilot chat.
 - **Copilot runs the task but no files appear** — it used its built-in Code Interpreter
-  instead of coccopilot routines. Use `--persona notation`; if it still goes off-script,
-  name a routine explicitly (`Use the write_file tool to ...`).
+  instead of coccopilot blocks. The bridge nudges it back; you can also name a tool
+  explicitly (`Use the write_file tool to ...`).
+- **A copied reply is not picked up** — it has no `coccopilot` block, or it is identical
+  to what was already on the clipboard. Press Enter to submit the clipboard anyway.
 - **Commands keep getting denied** — you answered `n` at the `[y/N]` prompt. Approve, or
   pass `-y`.
 - **A command is waiting at a prompt** — coccopilot detects the idle prompt and asks you;
@@ -418,7 +447,7 @@ work against is `test/fixtures/sample-project/`.
 - Automating the Copilot web app may conflict with Microsoft's terms of service.
   coccopilot deliberately does not automate it — you drive the webapp by hand — but
   review Microsoft's terms for your own use.
-- Copilot's behavior and refusals can change without notice; the persona and drift
+- Copilot's behavior and refusals can change without notice; the prompt and drift
   handling live in `prompts/` and `src/agent/`.
 - The model sometimes edits more than asked (e.g. "fixing" an unrelated script). Review
   diffs before committing.

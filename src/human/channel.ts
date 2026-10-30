@@ -1,4 +1,4 @@
-import { detectClipboard, normalizeClipboard, type Clipboard } from "./clipboard.js";
+import { detectClipboard, guardClipboard, normalizeClipboard, watchClipboard, type Clipboard } from "./clipboard.js";
 import { resolveCachePath, writeCache } from "./cache.js";
 import { HumanTerminal } from "./terminal.js";
 import { TranscriptChannel } from "./transcript.js";
@@ -54,6 +54,13 @@ export interface ChannelOptions {
    */
   maxMessageChars?: number;
   /**
+   * While waiting for a reply, watch the clipboard and take Copilot's reply as soon as
+   * the operator copies it — no terminal step needed. Off unless asked for.
+   */
+  watch?: boolean;
+  /** Clipboard poll interval while watching (tests shorten it). */
+  watchIntervalMs?: number;
+  /**
    * Shared stdin reader. The caller owns it so command approvals can use the same
    * input stream instead of opening a competing readline.
    */
@@ -73,6 +80,34 @@ function charCount(text: string): string {
   return `${text.length} char${text.length === 1 ? "" : "s"}`;
 }
 
+/** Clipboard watching settings handed to a channel; absent when watching is off. */
+interface Watcher {
+  clipboard: Clipboard;
+  intervalMs?: number;
+}
+
+type FirstInput = { line: string } | { copied: string };
+
+/**
+ * Wait for the operator's next terminal line or, when watching, for Copilot's reply to
+ * land on the clipboard — whichever comes first. The losing wait is withdrawn so it
+ * cannot swallow later input.
+ */
+async function nextLineOrCopiedReply(terminal: HumanTerminal, watcher?: Watcher): Promise<FirstInput> {
+  if (!watcher) return { line: await terminal.nextLine() };
+  const ac = new AbortController();
+  try {
+    return await Promise.race<FirstInput>([
+      terminal.nextLine(ac.signal).then((line) => ({ line })),
+      watchClipboard(watcher.clipboard, ac.signal, watcher.intervalMs).then((copied) =>
+        copied === undefined ? new Promise<never>(() => {}) : { copied },
+      ),
+    ]);
+  } finally {
+    ac.abort();
+  }
+}
+
 /** Clipboard channel: outgoing copied for paste; replies read back from the clipboard. */
 class ClipboardChannel extends TranscriptChannel {
   readonly mode = "clipboard" as const;
@@ -85,12 +120,19 @@ class ClipboardChannel extends TranscriptChannel {
     private readonly webappUrl: string,
     private readonly log: (msg: string) => void,
     maxMessageChars?: number,
+    private readonly watcher?: Watcher,
   ) {
     super(maxMessageChars);
   }
 
   protected async onSend(message: string): Promise<void> {
     await this.clipboard.write(message);
+    if (this.watcher) {
+      this.terminal.bell();
+      void guardClipboard(this.clipboard, message, () =>
+        this.terminal.write("[coccopilot] the reply was copied again over the results — put the results back on the clipboard."),
+      );
+    }
     this.lastSent = message;
     this.terminal.write(`\n${RULE}`);
     if (this.wasSplit) {
@@ -106,7 +148,11 @@ class ClipboardChannel extends TranscriptChannel {
       this.terminal.write("");
       this.terminal.write(`  1. Open the Copilot webapp:  ${this.webappUrl}`);
       this.terminal.write("  2. Paste it into the composer and send.");
-      this.terminal.write("  3. Select Copilot's full reply and copy it (Cmd/Ctrl+C).");
+      this.terminal.write(
+        this.watcher
+          ? "  3. Click the copy button on Copilot's reply — coccopilot picks it up on its own."
+          : "  3. Select Copilot's full reply and copy it (Cmd/Ctrl+C).",
+      );
     } else {
       this.terminal.write(`[coccopilot] copied to clipboard (${charCount(message)}) — paste, send, copy the reply.`);
     }
@@ -126,9 +172,16 @@ class ClipboardChannel extends TranscriptChannel {
   protected async nextReply(status?: string): Promise<string> {
     while (true) {
       this.terminal.write(
-        `[coccopilot] ${compactStatus(status)}Press Enter once Copilot's reply is on your clipboard.`,
+        this.watcher
+          ? `[coccopilot] ${compactStatus(status)}Waiting for Copilot's reply on the clipboard (or press Enter to read it now).`
+          : `[coccopilot] ${compactStatus(status)}Press Enter once Copilot's reply is on your clipboard.`,
       );
-      const typed = await this.terminal.nextLine();
+      const first = await nextLineOrCopiedReply(this.terminal, this.watcher);
+      if ("copied" in first) {
+        this.terminal.write(`[coccopilot] picked up Copilot's reply from the clipboard (${charCount(first.copied)}).`);
+        return first.copied;
+      }
+      const typed = first.line;
       const closed = this.terminal.isClosed;
 
       // A non-empty line is a manually supplied reply (handy for short replies or
@@ -183,6 +236,7 @@ class CacheChannel extends TranscriptChannel {
     private readonly log: (msg: string) => void,
     private readonly clipboard: Clipboard | null,
     private readonly clipboardCap?: number,
+    private readonly watcher?: Watcher,
   ) {
     // The file is the transport, so never split the frame into parts.
     super(0);
@@ -197,12 +251,23 @@ class CacheChannel extends TranscriptChannel {
       try {
         await this.clipboard.write(message);
         this.lastCopied = message;
+        if (this.watcher) {
+          void guardClipboard(this.clipboard, message, () =>
+            this.terminal.write("[coccopilot] the reply was copied again over the results — put the results back on the clipboard."),
+          );
+        }
       } catch (err) {
         this.log(`clipboard write failed: ${(err as Error).message}`);
       }
     } else {
       this.lastCopied = "";
+      // Too big to paste: put the file's path on the clipboard instead, ready for the
+      // attach dialog (e.g. Cmd+Shift+G on macOS, or the address bar on Windows).
+      if (this.clipboard) {
+        await this.clipboard.write(this.cachePath).catch((err: Error) => this.log(`clipboard write failed: ${err.message}`));
+      }
     }
+    if (this.watcher) this.terminal.bell();
 
     this.terminal.write(`\n${RULE}`);
     if (!this.instructionsShown) {
@@ -214,7 +279,7 @@ class CacheChannel extends TranscriptChannel {
         this.terminal.write(`[coccopilot] also copied to your clipboard (fits the paste limit).`);
       } else if (this.clipboard) {
         this.terminal.write(
-          `[coccopilot] too large for the composer — attach or open the cache file instead.`,
+          `[coccopilot] too large for the composer — attach the cache file instead (its path is on your clipboard).`,
         );
       } else {
         this.terminal.write(
@@ -228,9 +293,17 @@ class CacheChannel extends TranscriptChannel {
           ? "  2. Paste the copied results into the composer and send."
           : "  2. Attach the cache file (or copy its contents) and send it.",
       );
-      this.terminal.write("  3. Copy/select Copilot's full reply.");
+      this.terminal.write(
+        this.watcher
+          ? "  3. Click the copy button on Copilot's reply — coccopilot picks it up on its own."
+          : "  3. Copy/select Copilot's full reply.",
+      );
     } else {
-      const how = this.lastCopied ? "also copied to clipboard" : "written to the cache file";
+      const how = this.lastCopied
+        ? "copied to clipboard — paste and send"
+        : this.clipboard
+          ? "too large to paste — attach the cache file (path on clipboard)"
+          : "written to the cache file — attach it";
       this.terminal.write(`[coccopilot] results ${how} (${charCount(message)}).`);
     }
     this.terminal.write(`${RULE}`);
@@ -238,11 +311,23 @@ class CacheChannel extends TranscriptChannel {
 
   protected async nextReply(status?: string): Promise<string> {
     while (true) {
-      const hint = this.clipboard ? " (Or just press Enter to read the clipboard.)" : "";
-      this.terminal.write(
-        `[coccopilot] ${compactStatus(status)}Paste Copilot's reply below; finish with a line containing only ${this.sentinel}.${hint}`,
-      );
-      const first = await this.terminal.nextLine();
+      if (this.watcher) {
+        this.terminal.write(
+          `[coccopilot] ${compactStatus(status)}Waiting for Copilot's reply — copy it and coccopilot takes it from the clipboard. ` +
+            `(Or paste it here, ending with ${this.sentinel}.)`,
+        );
+      } else {
+        const hint = this.clipboard ? " (Or just press Enter to read the clipboard.)" : "";
+        this.terminal.write(
+          `[coccopilot] ${compactStatus(status)}Paste Copilot's reply below; finish with a line containing only ${this.sentinel}.${hint}`,
+        );
+      }
+      const input = await nextLineOrCopiedReply(this.terminal, this.watcher);
+      if ("copied" in input) {
+        this.terminal.write(`[coccopilot] picked up Copilot's reply from the clipboard (${charCount(input.copied)}).`);
+        return input.copied;
+      }
+      const first = input.line;
       const closed = this.terminal.isClosed;
 
       // A bare Enter means "read the clipboard" — handy when the operator copied the
@@ -267,7 +352,10 @@ class CacheChannel extends TranscriptChannel {
           this.terminal.write("[coccopilot] the clipboard is empty — paste Copilot's reply, then the sentinel.");
           continue;
         }
-        if (this.lastCopied && normalizeClipboard(text) === normalizeClipboard(this.lastCopied)) {
+        if (
+          (this.lastCopied && normalizeClipboard(text) === normalizeClipboard(this.lastCopied)) ||
+          normalizeClipboard(text) === this.cachePath
+        ) {
           this.terminal.write(
             "[coccopilot] the clipboard still holds the message we gave you — paste Copilot's reply instead.",
           );
@@ -351,6 +439,9 @@ export async function createChannel(opts: ChannelOptions): Promise<ChannelHandle
     : opts.clipboard !== undefined
       ? opts.clipboard
       : await detectClipboard(opts.log);
+  const watcher: Watcher | undefined =
+    opts.watch && clipboard ? { clipboard, intervalMs: opts.watchIntervalMs } : undefined;
+  const watching = watcher ? ", auto-reads Copilot's reply when you copy it" : "";
 
   if (opts.cache) {
     const cachePath = resolveCachePath(opts.workspaceRoot ?? process.cwd(), opts.cachePath);
@@ -366,16 +457,17 @@ export async function createChannel(opts: ChannelOptions): Promise<ChannelHandle
         opts.log,
         clipboard,
         opts.maxMessageChars,
+        watcher,
       ),
-      description: `cache file (${cachePath})${handle}`,
+      description: `cache file (${cachePath})${handle}${watching}`,
     };
   }
 
   if (!opts.forceManual) {
     if (clipboard) {
       return {
-        channel: new ClipboardChannel(clipboard, terminal, opts.webappUrl, opts.log, opts.maxMessageChars),
-        description: `clipboard (${clipboard.description})`,
+        channel: new ClipboardChannel(clipboard, terminal, opts.webappUrl, opts.log, opts.maxMessageChars, watcher),
+        description: `clipboard (${clipboard.description})${watching}`,
       };
     }
     opts.log("no clipboard backend found; falling back to manual paste mode");
