@@ -9,6 +9,7 @@ import { detectClipboard } from "./human/clipboard.js";
 import { HumanTerminal } from "./human/terminal.js";
 import { createChannel, type CopilotChannel } from "./human/channel.js";
 import { runBridge } from "./agent/bridge.js";
+import { parseApplyArgs, parsePackArgs, printPackUsage, runApply, runPack } from "./pack/commands.js";
 
 interface CliArgs {
   task: string;
@@ -93,6 +94,7 @@ function printUsage(): void {
     [
       'usage: coccopilot [options] ["<optional first task>"]',
       "       coccopilot doctor | install <tool> | install --all",
+      "       coccopilot pack [options] [\"<task>\"] | apply [<changes.txt> | -] [options]",
       "",
       "  Runs a human-operated bridge: it renders each message for you to paste into",
       "  the Copilot webapp, reads back the reply you bring (via the clipboard), and",
@@ -120,6 +122,8 @@ function printUsage(): void {
       "  doctor                 check for required/external tools and show install hints",
       "  install <tool>         install a known tool (pytest, pyspark, python, git, …)",
       "  install --all          install every known tool that is missing",
+      "  pack                   encode the workspace into one .txt file to upload to Copilot",
+      "  apply                  apply the change set from Copilot's reply (see: coccopilot pack --help)",
     ].join("\n"),
   );
 }
@@ -314,6 +318,17 @@ async function main(): Promise<void> {
       return;
     }
     await runInstall(rest, argv.includes("--yes") || argv.includes("-y"));
+    return;
+  }
+
+  if (argv[0] === "pack" || argv[0] === "apply") {
+    const rest = argv.slice(1);
+    if (rest.includes("--help") || rest.includes("-h")) {
+      printPackUsage();
+      return;
+    }
+    if (argv[0] === "pack") await runPack(parsePackArgs(rest));
+    else if (!(await runApply(parseApplyArgs(rest)))) process.exitCode = 1;
     return;
   }
 

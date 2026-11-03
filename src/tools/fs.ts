@@ -279,7 +279,7 @@ export const grepTool: Tool = {
 };
 
 /** Minimal glob → RegExp: supports *, **, ?, and literal path segments. */
-function globToRegExp(pattern: string): RegExp {
+export function globToRegExp(pattern: string): RegExp {
   const norm = pattern.replace(/\\/g, "/").replace(/^\.\//, "");
   let re = "";
   for (let i = 0; i < norm.length; i++) {

@@ -8,6 +8,10 @@
 
 ## Backlog
 
+- **Pack mode follow-ups.** Trial `--max-chars` parts on a repo too large for one upload;
+  check that follow-up replies in the same chat build on earlier change sets; consider
+  `apply` printing the git diff after writing.
+
 - **Attach-aware framing.** Once Copilot reliably reads an attached `cache.md`, consider
   dropping the clipboard copy entirely.
 
@@ -39,6 +43,15 @@
   driver to exercise the bridge deterministically in CI without a browser.
 
 ## Done
+
+- **Pack mode (`pack` / `apply`).** For Copilot Enterprise, which reads uploaded or
+  mounted files: `coccopilot pack` encodes the repository (tree + every text file between
+  line-counted `@@@ FILE`/`@@@ END` markers) into one `.txt`, and copies a kick-off
+  message that teaches the change format. `coccopilot apply` decodes Copilot's
+  SEARCH/REPLACE, FILE, DELETE and RENAME change set and applies it all-or-nothing, with a
+  failure report for Copilot that quotes the real text. Trialled on M365 Copilot: a
+  multi-file change applied in one round trip (after adding a blank-line-insensitive
+  SEARCH tier), and a ~280k-char pack of this repo was described correctly.
 
 - **Clipboard watch + single prompt.** While waiting for a reply, coccopilot polls the
   clipboard and takes Copilot's reply as soon as it is copied (when it holds a

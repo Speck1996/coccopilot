@@ -40,6 +40,11 @@ export async function loadSystemPrompt(toolsBlock: string): Promise<string> {
   return template.replace("{{TOOLS}}", toolsBlock);
 }
 
+/** Load another prompt template from `prompts/` by file name. */
+export async function loadPrompt(name: string): Promise<string> {
+  return readFile(resolve(promptsDir, name), "utf8");
+}
+
 /** The JSON block that seeds a stalled session. */
 export const OPENING_BLOCK = '```coccopilot\n{ "tool": "list_dir", "args": { "path": "." } }\n```';
 

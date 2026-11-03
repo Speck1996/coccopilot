@@ -117,6 +117,97 @@ It has been trialled end to end: it follows the prompt without refusing, batches
 calls per reply, and finishes with `done`. Use the **Copy** button under the whole message
 (not a code block's), click it once, and start each task in a new chat.
 
+### Pack mode: the whole repo in one file (`pack` / `apply`)
+
+Copilot Enterprise (M365 Copilot) can read files you upload or keep in the workspace it
+mounts. Pack mode uses that instead of the tool loop: you hand Copilot the **whole
+repository as one `.txt` file**, it answers with a **change set**, and coccopilot applies
+it locally. One round trip per change, no tool calls.
+
+```bash
+coccopilot pack --cwd ./myapp "add a /health endpoint"   # writes .coccopilot/myapp.pack.txt
+# upload the file to Copilot, paste the kick-off message (on your clipboard), send
+# copy Copilot's reply, then:
+coccopilot apply --cwd ./myapp                            # reads the change set from the clipboard
+```
+
+**The pack** is plain text, so Copilot reads the code as code. It starts with the
+change-format instructions and the folder structure (an indented tree; single-child
+directory chains such as `src/main/java/com/acme/` collapse onto one line), then every
+text file between marker lines:
+
+```text
+@@@ FILE src/server.ts [42 lines]
+...the file, verbatim...
+@@@ END src/server.ts
+```
+
+The `[42 lines]` count makes decoding exact even when a file itself contains marker
+lines, and a file without a trailing newline says so, so a pack unpacks byte for byte.
+File selection follows git (tracked + untracked, `.gitignore` honored; a plain walk that
+skips `node_modules`, `dist`, … outside a repo). Binaries, files over `--max-file-bytes`,
+lockfiles, minified bundles and source maps appear in the tree as `(not included: …)` so
+Copilot knows they exist without paying for them.
+
+**The change set** Copilot writes back uses the same markers, in one `~~~~` block:
+
+```text
+@@@ EDIT src/server.ts
+<<<<<<< SEARCH
+app.listen(3000);
+=======
+app.get("/health", (_req, res) => res.json({ ok: true }));
+app.listen(3000);
+>>>>>>> REPLACE
+@@@ END src/server.ts
+@@@ FILE src/health.ts
+...full content of a new or rewritten file...
+@@@ END src/health.ts
+@@@ DELETE src/legacy.ts
+@@@ RENAME src/util.ts -> src/lib/util.ts
+```
+
+SEARCH/REPLACE edits are used instead of unified diffs because models copy text far
+more reliably than they count line numbers. `apply`:
+
+- matches each SEARCH exactly, then ignoring trailing whitespace, then ignoring
+  indentation (re-indenting the replacement), then ignoring blank lines; a SEARCH that
+  matches more than one place is refused, never guessed;
+- plans everything in memory first and writes **nothing unless every change applies**
+  (`--partial` to apply what works). On a failure it prints a report for Copilot, quoting
+  the real text near where the SEARCH should have landed, and puts it on the clipboard;
+- keeps CRLF files CRLF, stays inside the workspace and never writes into `.git`;
+- ignores prose and fences around the change set, and tolerates a missing `@@@ END` or a
+  code fence inside a FILE block;
+- asks `[y/N]` before writing (`-y` to skip, `--dry-run` to only show the summary).
+
+| `pack` option | Description |
+| --- | --- |
+| `-o, --output <path>` | Pack file. Default: `<workspace>/.coccopilot/<name>.pack.txt` (gitignored). |
+| `--exclude <glob>` | Leave matching files out (repeatable; `dir/` excludes a directory). |
+| `--no-default-excludes` | Also inline lockfiles, minified bundles and source maps. |
+| `--max-file-bytes <n>` | List larger files without content. Default: `200000`. |
+| `--max-chars <n>` | Split into parts of about `n` characters (files are never split). |
+| `--no-clipboard` | Print the kick-off message instead of copying it. |
+
+| `apply` option | Description |
+| --- | --- |
+| `<file>` / `-` | Read the change set from a file or stdin. Default: the clipboard (waits for one if it holds none). |
+| `--dry-run` | Show what would change; write nothing. |
+| `-y, --yes` | Apply without asking. |
+| `--partial` | Apply the changes that work even if some fail. |
+| `--watch` | Keep watching the clipboard and apply each new change set. |
+
+**Trialled on M365 Copilot.** A small task (edit two files, add a module with tests,
+document it) came back as a clean change set and applied in one round trip with the
+tests passing; the one SEARCH that missed had dropped a blank line, which `apply` now
+tolerates. A ~280k-character pack of this repository was read and described correctly.
+Copilot's Copy button may drop the `~~~~` fence; that is fine, the parser does not need it.
+
+The kick-off message repeats the change-format instructions, because Copilot may only
+retrieve parts of a large uploaded file. Applying a pack itself works too: it recreates
+the snapshot, which makes `apply` double as an unpacker.
+
 ### Why human-in-the-loop
 
 Automating the Copilot web app — driving the composer, injecting messages, and reading
@@ -382,6 +473,11 @@ src/
     protocol.ts          tool-call parsing (single, batched, tolerant)
     prompt.ts            system prompt assembly + result framing
     drift.ts             detects built-in sandbox/interpreter drift in a reply
+  pack/
+    format.ts            pack / change-set text format: encoder and tolerant parser
+    pack.ts              file selection, tree rendering, pack assembly and splitting
+    apply.ts             in-memory change planning, SEARCH matching, writing
+    commands.ts          the `pack` and `apply` subcommands
   tools/
     fs.ts                read/write/edit/list/glob/grep
     shell.ts             run_command (routes interactive prompts to the approver)
@@ -393,10 +489,12 @@ src/
     workspace.ts         path confinement
     policy.ts            command deny-list + approval
 prompts/agent.md         the single prompt sent to Copilot
+prompts/pack.md          the change-format instructions embedded in a pack
 test/
   scenarios.test.ts      explain / create-project / refactor task simulations
   ux.test.ts             nudge, malformed-block, refusal, drift, budget-recovery simulations
   cache.test.ts          cache file write/overwrite, clipboard cap, sentinel + bare-Enter inbound
+  pack.test.ts           pack round-trip, tree, splitting, change-set parsing and apply
   clipboard.test.ts      clipboard guards, manual sentinel, one-time instructions, status line
   e2e.test.ts            spawns the real CLI (manual and cache modes) over piped stdin
   support/               ScriptedChannel + runSession harness, fixture project

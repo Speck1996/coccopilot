@@ -155,11 +155,13 @@ export const WATCH_INTERVAL_MS = 600;
  * write the clipboard more than once, and acting on the first write lets the second
  * one land on top of the results. Resolves undefined once `signal` aborts. Read
  * failures are skipped, not fatal: the operator can still paste into the terminal.
+ * `accept` decides what counts as a reply (a coccopilot call by default).
  */
 export async function watchClipboard(
   clipboard: Clipboard,
   signal: AbortSignal,
   intervalMs = WATCH_INTERVAL_MS,
+  accept: (text: string) => boolean = looksLikeToolReply,
 ): Promise<string | undefined> {
   const read = () => clipboard.read().then(normalizeClipboard, () => undefined);
   let baseline = await read();
@@ -176,7 +178,7 @@ export async function watchClipboard(
     }
     if (text === baseline) continue;
     baseline = text;
-    candidate = looksLikeToolReply(text) ? text : undefined;
+    candidate = accept(text) ? text : undefined;
     steadyPolls = 0;
   }
   return undefined;
