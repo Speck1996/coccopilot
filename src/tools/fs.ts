@@ -12,8 +12,9 @@ function display(ctx: ToolContext, abs: string): string {
 
 export const writeFileTool: Tool = {
   name: "write_file",
-  description: "Create or overwrite a file inside the workspace with the given text content.",
-  signature: "write_file(path: string, content: string) — path is relative to the workspace root",
+  description:
+    "Create a file, or overwrite one with new content. content is the complete file: never \"...\" or \"rest unchanged\" placeholders.",
+  signature: "write_file(path: string, content: string) — path is relative to the project folder",
   async run(call, ctx) {
     const rawPath = call.args.path;
     const content = call.args.content;
@@ -45,8 +46,9 @@ export const writeFileTool: Tool = {
 export const editFileTool: Tool = {
   name: "edit_file",
   description:
-    "Replace an exact snippet of text in an existing file. By default old_string must appear " +
-    "exactly once; set replace_all to change every occurrence. Use this for surgical edits.",
+    "Replace a snippet of an existing file. old_string is copied character for character (indentation included) " +
+    "from the file as you last read it, and must appear exactly once; add surrounding lines to make it unique, " +
+    "or set replace_all to change every occurrence.",
   signature:
     "edit_file(path: string, old_string: string, new_string: string, replace_all?: boolean)",
   async run(call, ctx) {
@@ -117,8 +119,8 @@ export const editFileTool: Tool = {
 
 export const readFileTool: Tool = {
   name: "read_file",
-  description: "Read a UTF-8 text file inside the workspace and return its contents.",
-  signature: "read_file(path: string) — path is relative to the workspace root",
+  description: "Return a text file's full contents, exactly as on disk (no line numbers added).",
+  signature: "read_file(path: string) — path is relative to the project folder",
   async run(call, ctx) {
     const rawPath = call.args.path;
     if (typeof rawPath !== "string" || rawPath.length === 0) {
@@ -148,8 +150,8 @@ export const readFileTool: Tool = {
 
 export const listDirTool: Tool = {
   name: "list_dir",
-  description: "List the entries of a directory inside the workspace, with sizes for files.",
-  signature: 'list_dir(path?: string) — directory relative to the workspace root (default ".")',
+  description: "List the entries of a directory, with sizes for files.",
+  signature: 'list_dir(path?: string) — directory relative to the project folder (default ".")',
   async run(call, ctx) {
     const rawPath = typeof call.args.path === "string" && call.args.path ? call.args.path : ".";
     let abs: string;
@@ -210,7 +212,7 @@ async function walk(root: string, dir: string, out: WalkEntry[], maxEntries: num
 
 export const globTool: Tool = {
   name: "glob",
-  description: "Find files in the workspace whose path matches a glob pattern (supports * and **).",
+  description: "List the files whose path matches a glob pattern (supports * and **).",
   signature: 'glob(pattern: string) — e.g. "**/*.ts" or "src/*.py"',
   async run(call, ctx) {
     const pattern = call.args.pattern;
@@ -231,7 +233,7 @@ export const globTool: Tool = {
 
 export const grepTool: Tool = {
   name: "grep",
-  description: "Search file contents in the workspace for a regular expression, returning matching lines.",
+  description: "Search file contents for a regular expression, returning matching lines.",
   signature: 'grep(pattern: string, glob?: string) — glob optionally restricts which files are searched',
   async run(call, ctx) {
     const pattern = call.args.pattern;

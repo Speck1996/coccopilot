@@ -7,7 +7,16 @@ import { HumanTerminal } from "../human/terminal.js";
 import { Workspace } from "../sandbox/workspace.js";
 import { describePlan, failureReport, planChanges, writePlan } from "./apply.js";
 import { INSTRUCTIONS_CLOSE, INSTRUCTIONS_OPEN, parseChanges } from "./format.js";
+import { packToDocx } from "./docx.js";
 import { buildPack, DEFAULT_MAX_FILE_BYTES } from "./pack.js";
+
+export const PACK_FORMATS = ["txt", "docx"] as const;
+export type PackFormat = (typeof PACK_FORMATS)[number];
+
+const FORMAT_INFO: Record<PackFormat, { ext: string; kind: string }> = {
+  txt: { ext: ".txt", kind: "text file" },
+  docx: { ext: ".docx", kind: "Word document" },
+};
 
 const log = (msg: string) => console.log(`[coccopilot] ${msg}`);
 
@@ -18,6 +27,8 @@ export interface PackArgs {
   defaultExcludes: boolean;
   maxFileBytes?: number;
   maxChars?: number;
+  /** Output format; undefined = inferred from --output's extension, else txt. */
+  format?: PackFormat;
   clipboard: boolean;
   task: string;
 }
@@ -50,6 +61,11 @@ export function parsePackArgs(argv: string[]): PackArgs {
     else if (a === "--no-default-excludes") args.defaultExcludes = false;
     else if (a === "--max-file-bytes") args.maxFileBytes = Number(takeValue(argv, ++i, a));
     else if (a === "--max-chars") args.maxChars = Number(takeValue(argv, ++i, a));
+    else if (a === "--format") {
+      const v = takeValue(argv, ++i, a).toLowerCase().replace(/^\./, "");
+      if (!(PACK_FORMATS as readonly string[]).includes(v)) throw new Error(`--format must be one of ${PACK_FORMATS.join(", ")}, got ${v}`);
+      args.format = v as PackFormat;
+    } else if (a === "--docx") args.format = "docx";
     else if (a === "--no-clipboard") args.clipboard = false;
     else if (a.startsWith("-")) throw new Error(`unknown flag for pack: ${a}`);
     else positionals.push(a);
@@ -82,7 +98,7 @@ export function printPackUsage(): void {
       'usage: coccopilot pack [options] ["<task>"]',
       "       coccopilot apply [<changes.txt> | -] [options]",
       "",
-      "  pack:  encode the workspace (folder structure + every text file) into one .txt file",
+      "  pack:  encode the workspace (folder structure + every text file) into one .txt or .docx file",
       "         to upload to Copilot, and copy a kick-off message that teaches it the change format.",
       "  apply: decode the change set from Copilot's reply (clipboard by default, a file, or",
       "         stdin with -) and apply it to the workspace. Nothing is written unless every",
@@ -90,7 +106,9 @@ export function printPackUsage(): void {
       "",
       "pack options:",
       "  --cwd <dir>              workspace root (default: current directory)",
-      "  -o, --output <path>      pack file (default: <workspace>/.coccopilot/<name>.pack.txt)",
+      "  -o, --output <path>      pack file (default: <workspace>/.coccopilot/<name>.pack.<format>)",
+      "  --format txt|docx        pack as plain text or as a Word document (default: from -o's",
+      "                           extension, else txt); --docx is short for --format docx",
       "  --exclude <glob>         leave matching files out (repeatable; \"dir/\" for a directory)",
       "  --no-default-excludes    also inline lockfiles, minified bundles and source maps",
       `  --max-file-bytes <n>     list larger files without their content (default: ${DEFAULT_MAX_FILE_BYTES})`,
@@ -108,18 +126,27 @@ export function printPackUsage(): void {
   );
 }
 
-function partPath(base: string, index: number, total: number): string {
+export function partPath(base: string, index: number, total: number, ext = ".txt"): string {
   if (total === 1) return base;
-  return base.replace(/(\.txt)?$/i, (ext) => `.part${index}of${total}${ext || ".txt"}`);
+  const re = new RegExp(`(${ext.replace(".", "\\.")})?$`, "i");
+  return base.replace(re, (found) => `.part${index}of${total}${found || ext}`);
+}
+
+/** --format wins; otherwise a .docx output path means docx; otherwise txt. */
+export function resolveFormat(args: Pick<PackArgs, "format" | "output">): PackFormat {
+  if (args.format) return args.format;
+  return args.output && /\.docx$/i.test(args.output) ? "docx" : "txt";
 }
 
 /** The message pasted into the chat with the uploaded pack. */
-export function kickoffMessage(fileNames: string[], instructions: string, task: string): string {
+export function kickoffMessage(fileNames: string[], instructions: string, task: string, format: PackFormat = "txt"): string {
   const files = fileNames.map((f) => `"${f}"`).join(", ");
+  const what = format === "docx" ? "a Word document holding a snapshot" : "a plain-text snapshot";
   return [
-    `I've attached ${files}: a plain-text snapshot of my repository. It starts with the folder structure,`,
+    `I've attached ${files}: ${what} of my repository. It starts with the folder structure,`,
     `then holds every text file between "@@@ FILE <path>" and "@@@ END <path>" lines.`,
-    "Please read it as the current state of my code.",
+    "Please read it as the current state of my code: work from the full file contents, not a summary.",
+    "If the attachment looks cut off or you can't open part of it, tell me instead of guessing at the missing code.",
     "",
     INSTRUCTIONS_OPEN,
     instructions.trim(),
@@ -133,6 +160,8 @@ export async function runPack(args: PackArgs): Promise<void> {
   const root = resolve(args.cwd ?? process.cwd());
   const instructions = await loadPrompt("pack.md");
   const output = args.output ? resolve(args.output) : undefined;
+  const format = resolveFormat(args);
+  const { ext, kind } = FORMAT_INFO[format];
 
   const pack = await buildPack({
     root,
@@ -142,15 +171,19 @@ export async function runPack(args: PackArgs): Promise<void> {
     maxChars: args.maxChars,
     skipPaths: output ? [output] : [],
     instructions,
+    documentKind: kind,
   });
 
   const total = pack.parts.length;
-  const base = output ?? join(root, CACHE_DIRNAME, `${pack.name}.pack.txt`);
-  const paths = pack.parts.map((_, i) => partPath(base, i + 1, total));
+  const base = output ?? join(root, CACHE_DIRNAME, `${pack.name}.pack${ext}`);
+  const paths = pack.parts.map((_, i) => partPath(base, i + 1, total, ext));
   await mkdir(dirname(base), { recursive: true });
   // Keep the default location out of the packed project's git history.
   if (!output) await writeFile(join(root, CACHE_DIRNAME, ".gitignore"), "*\n", "utf8").catch(() => undefined);
-  for (let i = 0; i < total; i++) await writeFile(paths[i], pack.parts[i], "utf8");
+  for (let i = 0; i < total; i++) {
+    const title = `${pack.name} snapshot${total > 1 ? ` (part ${i + 1} of ${total})` : ""}`;
+    await writeFile(paths[i], format === "docx" ? packToDocx(pack.parts[i], title) : pack.parts[i]);
+  }
 
   const included = pack.entries.filter((e) => e.content !== undefined).length;
   const chars = pack.parts.reduce((n, p) => n + p.length, 0);
@@ -158,7 +191,7 @@ export async function runPack(args: PackArgs): Promise<void> {
   for (const e of pack.entries.filter((e) => e.skipped)) log(`  listed only: ${e.path} (${e.skipped})`);
   for (const p of paths) log(`wrote ${p}`);
 
-  const message = kickoffMessage(paths.map((p) => basename(p)), instructions, args.task);
+  const message = kickoffMessage(paths.map((p) => basename(p)), instructions, args.task, format);
   const clipboard = args.clipboard ? await detectClipboard() : null;
   const copied = clipboard ? await clipboard.write(message).then(() => true, () => false) : false;
 

@@ -39,10 +39,8 @@ function runInstall(command: string, cwd: string, timeoutMs: number): Promise<In
 export const ensureToolTool: Tool = {
   name: "ensure_tool",
   description:
-    "Check whether a developer tool (e.g. pytest, pyspark, python, git, npm, docker) is installed, " +
-    "and install it if missing. Installs run through the workspace command policy: routine package " +
-    "managers run directly, while system installs (e.g. brew, apt with sudo) require approval. " +
-    "Use this when a command fails with 'command not found' (exit 127) instead of giving up.",
+    "Check whether a developer tool is installed and install it if missing (system installs wait for my " +
+    "approval). Use it when a command fails with 'command not found' (exit 127) instead of giving up.",
   signature:
     "ensure_tool(name: string, install?: boolean) — name is one of: " +
     TOOL_SPECS.map((s) => s.name).join(", ") +

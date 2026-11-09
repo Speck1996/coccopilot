@@ -44,6 +44,21 @@
 
 ## Done
 
+- **Pack as a Word document.** `coccopilot pack --format docx` (or `--docx`, or an
+  `-o` ending in `.docx`) writes the pack as a dependency-free `.docx`, one paragraph
+  per pack line with `@@@ FILE` lines as headings, for Copilot setups that summarise
+  uploaded `.txt` files instead of reading them in full.
+
+- **Misreading hardening (prompts + parser).** The prompt now spells out that blocks in
+  one reply can't use each other's output, forbids invented `TOOL RESULT`s, asks for
+  `done` on its own, gives the OS/shell, and explains four-backtick fences for content
+  holding ```. The parser no longer cuts a JSON call at ``` inside a string, repairs
+  raw newlines and trailing commas, and ignores `{ "name": … }` snippets outside a
+  `coccopilot` fence. A malformed block now asks for the whole reply again (nothing
+  in it ran); `done` alongside a failed call is refused; questions go to the operator;
+  `run_command` results name their command; the pack prompt forbids SEARCH from
+  memory and answering with a file or page instead of text.
+
 - **Pack mode (`pack` / `apply`).** For Copilot Enterprise, which reads uploaded or
   mounted files: `coccopilot pack` encodes the repository (tree + every text file between
   line-counted `@@@ FILE`/`@@@ END` markers) into one `.txt`, and copies a kick-off

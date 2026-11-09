@@ -50,7 +50,8 @@ coccopilot --cwd /path/to/project "run the tests and fix any failures"
 2. You hand the content to a Copilot chat — paste the copied text, or attach/open the cache
    file — and send. coccopilot goes idle right away; type your task straight into Copilot.
 3. Copilot replies with fenced `coccopilot` blocks containing tool calls. It may batch
-   **several tool calls in one message**; coccopilot parses all of them.
+   **several tool calls in one message**; coccopilot parses all of them (see
+   [How replies are read](#how-replies-are-read)).
 4. You click Copilot's copy button on the reply. coccopilot is watching the clipboard and
    takes it as soon as it contains a `coccopilot` block — no terminal step. (You can also
    paste it into the terminal with the sentinel line, or press Enter to read the clipboard.)
@@ -80,6 +81,31 @@ paste limit — a batched `TOOL RESULT` frame carrying whole files arrives intac
 - **Oversized frames:** when a frame is over the paste cap, coccopilot puts the cache
   file's **path** on the clipboard instead, ready for the browser's attach dialog
   (Cmd+Shift+G on macOS, the address bar on Windows).
+
+### How replies are read
+
+The parser is tolerant of how GPT-based Copilot actually writes blocks, but strict about
+what counts as a call:
+
+- **Only calls are run.** Any fence tag works (`coccopilot`, `coccopilot-json`, `json`,
+  three or four backticks, tildes), and a bare `{"tool": …}` object is accepted when the
+  Copy button drops the fence. Outside a `coccopilot` fence, an object keyed `name` only
+  counts with an `args`/`arguments` object, so a `package.json` snippet is never run.
+- **Nested fences survive.** A ``` line inside a JSON string (e.g. `write_file` of a
+  README) does not end the block. The prompt also asks for a four-backtick fence then,
+  so Copilot's own renderer shows the block intact.
+- **Common JSON slips are repaired**: raw newlines/tabs inside strings and trailing
+  commas. Anything else that won't parse rejects the **whole reply** (no partial runs),
+  and Copilot is asked to resend every block, not just the broken one.
+- **Results map back to calls.** Batched results are numbered in call order, and each
+  header names its target (path, or the command for `run_command`).
+- **`done` must be earned.** A `done` sent with calls that failed is refused and the task
+  stays open; the prompt asks for `done` in a reply of its own.
+- **Questions are not nudged.** A mid-task question with no block is left for you to
+  answer in the chat; other block-less replies get a corrective nudge.
+
+Each task message also states the OS and the shell `run_command` uses (e.g. macOS,
+`/bin/sh` with BSD tools), so Copilot picks commands that work.
 
 ### Clipboard watch
 
@@ -183,7 +209,8 @@ more reliably than they count line numbers. `apply`:
 
 | `pack` option | Description |
 | --- | --- |
-| `-o, --output <path>` | Pack file. Default: `<workspace>/.coccopilot/<name>.pack.txt` (gitignored). |
+| `-o, --output <path>` | Pack file. Default: `<workspace>/.coccopilot/<name>.pack.<txt\|docx>` (gitignored). |
+| `--format txt\|docx` | Plain text or a Word document (`--docx` for short). Default: from `-o`'s extension, else `txt`. |
 | `--exclude <glob>` | Leave matching files out (repeatable; `dir/` excludes a directory). |
 | `--no-default-excludes` | Also inline lockfiles, minified bundles and source maps. |
 | `--max-file-bytes <n>` | List larger files without content. Default: `200000`. |
@@ -203,6 +230,14 @@ document it) came back as a clean change set and applied in one round trip with 
 tests passing; the one SEARCH that missed had dropped a blank line, which `apply` now
 tolerates. A ~280k-character pack of this repository was read and described correctly.
 Copilot's Copy button may drop the `~~~~` fence; that is fine, the parser does not need it.
+
+**`.txt` or `.docx`.** Copilot sometimes works from a summary of an uploaded `.txt`
+rather than its full text. `--format docx` writes the same pack as a Word document,
+which Copilot reads through its document pipeline: one paragraph per pack line (so the
+markers and line counts survive a copy out of Word), `@@@ FILE` lines as headings for an
+outline, code in a monospace style. It is generated without dependencies (a minimal
+OOXML package zipped in-process); `--max-chars` splitting works the same way. `apply`
+does not read `.docx` packs back; it never needs to, Copilot's replies are plain text.
 
 The kick-off message repeats the change-format instructions, because Copilot may only
 retrieve parts of a large uploaded file. Applying a pack itself works too: it recreates
@@ -361,8 +396,12 @@ with a line containing only `<<<END>>>`.
 - **Missing-tool reply.** If Copilot drifts into the product's built-in Code Interpreter
   instead of emitting a block, coccopilot replies with a corrective nudge (and re-primes
   if it persists).
+- **Questions are yours to answer.** If Copilot asks a question mid-task instead of
+  writing a block, coccopilot sends nothing: answer it in the chat, and its next blocks
+  run as usual.
 - **Task completion is announced.** When the model emits `done`, coccopilot prints a
-  clear "task complete" banner and returns to idle, ready for the next task.
+  clear "task complete" banner and returns to idle, ready for the next task. A `done`
+  sent in the same reply as a call that failed is refused, and the task stays open.
 
 ## Tools the agent can use
 
@@ -374,7 +413,7 @@ with a line containing only `<<<END>>>`.
 | `list_dir` | `list_dir(path?)` |
 | `glob` | `glob(pattern)` — e.g. `"**/*.ts"` |
 | `grep` | `grep(pattern, glob?)` |
-| `run_command` | `run_command(command, timeout_ms?)` — tests, builds, git, installs |
+| `run_command` | `run_command(command, timeout_ms?)` — tests, builds, git, installs; default 60 s, max 120 s, last 200 lines of output |
 | `ensure_tool` | `ensure_tool(name, install?)` — check/install a dev tool (pytest, pyspark, …) |
 
 `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, and `grep` are confined to
@@ -476,6 +515,7 @@ src/
   pack/
     format.ts            pack / change-set text format: encoder and tolerant parser
     pack.ts              file selection, tree rendering, pack assembly and splitting
+    docx.ts              a pack as a Word document: OOXML parts and a minimal zip writer
     apply.ts             in-memory change planning, SEARCH matching, writing
     commands.ts          the `pack` and `apply` subcommands
   tools/
@@ -493,6 +533,7 @@ prompts/pack.md          the change-format instructions embedded in a pack
 test/
   scenarios.test.ts      explain / create-project / refactor task simulations
   ux.test.ts             nudge, malformed-block, refusal, drift, budget-recovery simulations
+  misread.test.ts        replies a model can get subtly wrong: nested fences, JSON slips, stray snippets
   cache.test.ts          cache file write/overwrite, clipboard cap, sentinel + bare-Enter inbound
   pack.test.ts           pack round-trip, tree, splitting, change-set parsing and apply
   clipboard.test.ts      clipboard guards, manual sentinel, one-time instructions, status line

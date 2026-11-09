@@ -33,6 +33,8 @@ export interface PackOptions {
   skipPaths?: string[];
   /** The change-format instructions embedded in the pack header. */
   instructions: string;
+  /** What the header calls the pack ("text file", "Word document"). Default: "text file". */
+  documentKind?: string;
 }
 
 export interface PackEntry {
@@ -229,7 +231,7 @@ export async function buildPack(opts: PackOptions): Promise<Pack> {
     const head = [`${MARKER} COCCOPILOT PACK v1 · ${name}${commit ? ` @ ${commit}` : ""} · ${stats}${partNote}`, ""];
     if (index === 0) {
       head.push(
-        `This text file is a snapshot of the repository "${name}": first the folder structure, then the full`,
+        `This ${opts.documentKind ?? "text file"} is a snapshot of the repository "${name}": first the folder structure, then the full`,
         `content of every text file, each between a "${MARKER} FILE <path> [<n> lines]" line and a "${MARKER} END <path>" line.`,
         `Paths are relative to the repository root.${total > 1 ? ` The files are spread over ${total} parts; this is part 1.` : ""}`,
         "",

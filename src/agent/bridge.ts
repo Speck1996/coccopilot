@@ -14,6 +14,7 @@ import {
   REFUSAL_NUDGE,
   NO_TOOL_NUDGE,
   DRIFT_NUDGE,
+  doneRejected,
   MISSED_CALL_SUMMARY,
   MALFORMED_SUMMARY,
   classifyReply,
@@ -91,14 +92,26 @@ export function runBridge(opts: BridgeOptions): Bridge {
     await dispatch(message);
   }
 
-  async function runCalls(calls: ReturnType<typeof parseAssistant>["calls"]): Promise<void> {
+  /**
+   * Run a batch and post its results. A done block in the same reply only closes the
+   * task when every call succeeded: "edit, run tests, done" with failing tests must not
+   * end the task on a claim the results contradict. Returns true when the task closes.
+   */
+  async function runCalls(calls: ToolCall[], doneCall?: ToolCall): Promise<boolean> {
     const results = await executeToolCalls(calls, {
       registry,
       ctx,
       log,
       onToolCall: opts.onToolCall,
     });
-    await post(frameToolResults(results));
+    const failed = results.filter((r) => !r.ok).length;
+    let frame = frameToolResults(results);
+    if (doneCall && failed > 0) {
+      log(`done block ignored: ${failed} call(s) in the same reply failed`);
+      frame += `\n\n---\n\n${doneRejected(failed)}`;
+    }
+    await post(frame);
+    return doneCall !== undefined && failed === 0;
   }
 
   /** Compact progress line shown beside the reply input prompt. */
@@ -141,8 +154,7 @@ export function runBridge(opts: BridgeOptions): Bridge {
       log("idle: tool request detected; starting a task");
       state = "working";
       startTask();
-      await runCalls(executable);
-      if (doneCall) finishTask(doneCall.args.summary);
+      if (await runCalls(executable, doneCall)) finishTask(doneCall!.args.summary);
       else await extendIfNeeded();
       return;
     }
@@ -150,8 +162,7 @@ export function runBridge(opts: BridgeOptions): Bridge {
     // state === "working": reacting to our own injected results.
     if (executable.length > 0) {
       taskTurns++;
-      await runCalls(executable);
-      if (doneCall) finishTask(doneCall.args.summary);
+      if (await runCalls(executable, doneCall)) finishTask(doneCall!.args.summary);
       else await extendIfNeeded();
       return;
     }
@@ -168,6 +179,13 @@ export function runBridge(opts: BridgeOptions): Bridge {
     const drifted = detectDrift(raw);
     const kind = classifyReply(parsed.text || raw);
     const refusal = !drifted && kind === "refusal";
+    if (kind === "question" && !drifted) {
+      // Only the operator can answer a question; an automatic "no block" nudge would
+      // read as a non-answer and push Copilot to guess. Nothing is posted, the task
+      // stays open, and Copilot's next blocks run as usual.
+      log("Copilot asked a question and wrote no block: answer it in the Copilot chat yourself (nothing was sent).");
+      return;
+    }
     if (nudges < MAX_NUDGES) {
       nudges++;
       log(

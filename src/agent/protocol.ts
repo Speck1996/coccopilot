@@ -13,13 +13,82 @@ export interface ParsedAssistant {
   raw?: string;
 }
 
+/** A fenced block found in a reply. */
+interface Fence {
+  lang: string;
+  body: string;
+  start: number;
+  end: number;
+}
+
 /**
- * Recognizes a fenced block. Tolerant on purpose: the language tag may contain
- * letters, digits, `.`, `_`, `+`, or `-` (e.g. `coccopilot-json`), may be preceded
- * by spaces, and the body may begin on the same line as the tag. Copilot clients
- * vary in how they emit the fence, and a near-miss here silently degrades to prose.
+ * Opening fence: three or more backticks or tildes, then an optional language tag.
+ * Tolerant on purpose: the tag may contain letters, digits, `.`, `_`, `+`, or `-`
+ * (e.g. `coccopilot-json`), and the body may begin on the same line as the tag.
+ * Copilot clients vary in how they emit the fence, and a near-miss here silently
+ * degrades to prose.
  */
-const FENCE_RE = /```[ \t]*([a-z0-9_.+-]*)[ \t]*\r?\n?([\s\S]*?)```/gi;
+const OPEN_FENCE_RE = /(`{3,}|~{3,})[ \t]*([a-z0-9_.+-]*)/gi;
+
+/**
+ * Find every fenced block. A fence closes at the first run of at least as many of the
+ * same character. When the body is JSON, runs inside JSON strings are skipped: a
+ * `write_file` of a Markdown file carries its own ``` lines inside `content`, and a
+ * naive scan would cut the call in half there.
+ */
+function scanFences(text: string): Fence[] {
+  const fences: Fence[] = [];
+  OPEN_FENCE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = OPEN_FENCE_RE.exec(text)) !== null) {
+    const marker = m[1];
+    const lang = (m[2] ?? "").toLowerCase();
+    let bodyStart = m.index + m[0].length;
+    bodyStart += /^[ \t]*\r?\n?/.exec(text.slice(bodyStart))![0].length;
+    const close = findClose(text, bodyStart, marker[0], marker.length);
+    const end = close ? close.end : text.length;
+    fences.push({ lang, body: text.slice(bodyStart, close ? close.start : text.length), start: m.index, end });
+    OPEN_FENCE_RE.lastIndex = end;
+  }
+  return fences;
+}
+
+/** Where a fence opened with `len` × `ch` closes, or undefined when it never does. */
+function findClose(text: string, from: number, ch: string, len: number): { start: number; end: number } | undefined {
+  const runAt = (i: number): number => {
+    let n = 0;
+    while (text[i + n] === ch) n++;
+    return n;
+  };
+  const json = /^\s*[[{]/.test(text.slice(from, from + 64));
+  if (json) {
+    let inString = false;
+    let escaped = false;
+    for (let i = from; i < text.length; i++) {
+      const c = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (c === "\\") escaped = true;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') inString = true;
+      else if (c === ch) {
+        const n = runAt(i);
+        if (n >= len) return { start: i, end: i + n };
+        i += n - 1;
+      }
+    }
+    // Unbalanced quotes: fall through to the plain scan.
+  }
+  for (let i = from; i < text.length; i++) {
+    if (text[i] !== ch) continue;
+    const n = runAt(i);
+    if (n >= len) return { start: i, end: i + n };
+    i += n - 1;
+  }
+  return undefined;
+}
 
 /**
  * Copilot is asked to emit one or more fenced blocks like:
@@ -49,24 +118,25 @@ export function parseAssistant(raw: string): ParsedAssistant {
   let rawBlock: string | undefined;
   let done = false;
 
-  FENCE_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = FENCE_RE.exec(text)) !== null) {
-    const lang = (match[1] ?? "").toLowerCase();
-    const body = match[2].trim();
+  for (const fence of scanFences(text)) {
+    const lang = fence.lang;
+    const body = fence.body.trim();
     if (!body) continue;
+    const strict = lang !== "coccopilot";
 
     const values = tryParseJsonValues(body);
     if (values.length === 0) {
-      // A coccopilot/json block that won't parse is a protocol error worth reporting.
-      if (lang === "coccopilot" || /"(tool|name|tool_name)"\s*:/.test(body)) {
+      // A coccopilot block (or one that names a `tool`) that won't parse is a protocol
+      // error worth reporting. A broken ```json snippet with a "name" key (a partial
+      // package.json, say) is just an illustration and stays prose.
+      if (!strict || /"(tool|tool_name)"\s*:/.test(body)) {
         parseError = `could not parse JSON in fenced block: ${body.slice(0, 200)}`;
         rawBlock = body;
       }
       continue;
     }
 
-    const extracted = values.flatMap((v) => extractCalls(v));
+    const extracted = values.flatMap((v) => extractCalls(v, strict));
     if (extracted.length > 0) {
       calls.push(...extracted);
       rawBlock = body;
@@ -77,13 +147,14 @@ export function parseAssistant(raw: string): ParsedAssistant {
 
   // Fall back to an unfenced call object. Only run when the fenced pass found nothing,
   // so a normal reply can never be reinterpreted by this looser path.
+  // Fenced bodies were already tried above, so only the prose outside them is scanned.
   if (calls.length === 0) {
-    const bare = scanBareCalls(text);
+    const bare = scanBareCalls(prose);
     if (bare) {
       if (bare.calls.length > 0) {
         calls.push(...bare.calls);
         rawBlock = bare.raw;
-        prose = stripFences(stripSpans(text, bare.spans));
+        prose = stripSpans(prose, bare.spans).trim();
       } else if (bare.error) {
         parseError = bare.error;
         rawBlock = bare.raw;
@@ -124,6 +195,9 @@ interface BareScan {
 function scanBareCalls(text: string): BareScan | undefined {
   // Object-key shaped: quoted or unquoted, at the start of the object or after a comma.
   const gate = /(?:^|[{,\s])["']?(?:tool|tool_name|name)["']?\s*:/;
+  // Only an object that names a `tool` is worth a parse error; `{ name: ... }` in prose
+  // is far more often an illustration than a broken call.
+  const errorGate = /(?:^|[{,\s])["']?(?:tool|tool_name)["']?\s*:/;
   const calls: ToolCall[] = [];
   const spans: Array<[number, number]> = [];
   let raw: string | undefined;
@@ -135,13 +209,13 @@ function scanBareCalls(text: string): BareScan | undefined {
     if (!gate.test(body)) continue;
     const parsed = tryParseJson(body);
     if (parsed === undefined) {
-      if (!error) {
+      if (!error && errorGate.test(body)) {
         error = `could not parse JSON in bare object: ${body.slice(0, 200)}`;
         raw = body;
       }
       continue;
     }
-    const extracted = extractCalls(parsed);
+    const extracted = extractCalls(parsed, true);
     if (extracted.length > 0) {
       calls.push(...extracted);
       spans.push([start, end]);
@@ -198,26 +272,59 @@ function stripSpans(text: string, spans: Array<[number, number]>): string {
 }
 
 function stripFences(text: string): string {
-  FENCE_RE.lastIndex = 0;
-  return text.replace(FENCE_RE, "").trim();
+  return stripSpans(text, scanFences(text).map((f): [number, number] => [f.start, f.end])).trim();
 }
 
-function tryParseJson(body: string): unknown | undefined {
+function parseOrUndefined(body: string): unknown | undefined {
   try {
     return JSON.parse(body);
   } catch {
-    // Try to salvage the first {...} object.
-    const start = body.indexOf("{");
-    const end = body.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(body.slice(start, end + 1));
-      } catch {
-        return undefined;
-      }
-    }
     return undefined;
   }
+}
+
+/**
+ * Fix the two slips models make most often in hand-written JSON: raw newlines/tabs
+ * inside a string (typical in a long `write_file` content) and trailing commas.
+ * Only used after strict parsing failed, so valid JSON is never rewritten.
+ */
+export function repairJson(body: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      else if (ch === "\n") { out += "\\n"; continue; }
+      else if (ch === "\r") { out += "\\r"; continue; }
+      else if (ch === "\t") { out += "\\t"; continue; }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === ",") {
+      const next = /^\s*([}\]])/.exec(body.slice(i + 1));
+      if (next) continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function tryParseJson(body: string): unknown | undefined {
+  const direct = parseOrUndefined(body) ?? parseOrUndefined(repairJson(body));
+  if (direct !== undefined) return direct;
+  // Try to salvage the first {...} object.
+  const start = body.indexOf("{");
+  const end = body.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const slice = body.slice(start, end + 1);
+    return parseOrUndefined(slice) ?? parseOrUndefined(repairJson(slice));
+  }
+  return undefined;
 }
 
 /**
@@ -273,18 +380,22 @@ function jsonValueSpans(text: string): string[] {
   return spans;
 }
 
-/** Accept a single call object, an array of calls, or `{ tools: [...] }`. */
-function extractCalls(value: unknown): ToolCall[] {
+/**
+ * Accept a single call object, an array of calls, or `{ tools: [...] }`. `strict` is set
+ * outside a `coccopilot` fence, where JSON is often just an illustration.
+ */
+function extractCalls(value: unknown, strict = false): ToolCall[] {
+  const one = (v: unknown) => normalizeCall(v, strict);
   if (Array.isArray(value)) {
-    return value.map((v) => normalizeCall(v)).filter((c): c is ToolCall => c !== undefined);
+    return value.map(one).filter((c): c is ToolCall => c !== undefined);
   }
   if (value && typeof value === "object") {
     const obj = value as Record<string, unknown>;
     if (Array.isArray(obj.tools)) {
-      return obj.tools.map((v) => normalizeCall(v)).filter((c): c is ToolCall => c !== undefined);
+      return obj.tools.map(one).filter((c): c is ToolCall => c !== undefined);
     }
   }
-  const single = normalizeCall(value);
+  const single = one(value);
   return single ? [single] : [];
 }
 
@@ -294,15 +405,21 @@ function extractCalls(value: unknown): ToolCall[] {
  *   { "name": "x", "arguments": {...} }   (tolerant)
  *   { "tool": "x", "path": "...", ... }   (args inline)
  */
-function normalizeCall(value: unknown): ToolCall | undefined {
+function normalizeCall(value: unknown, strict = false): ToolCall | undefined {
   if (!value || typeof value !== "object") return undefined;
   const obj = value as Record<string, unknown>;
 
   const name = obj.tool ?? obj.name ?? obj.tool_name;
   if (typeof name !== "string" || name.length === 0) return undefined;
 
-  let args: Record<string, unknown> = {};
   const argsCandidate = obj.args ?? obj.arguments ?? obj.parameters ?? obj.input;
+  // Outside a coccopilot fence, `{ "name": "my-app", "version": "1.0.0" }` is a
+  // package.json, not a call: `name` only counts when an arguments object comes with it.
+  if (strict && obj.tool === undefined && obj.tool_name === undefined && argsCandidate === undefined) {
+    return undefined;
+  }
+
+  let args: Record<string, unknown> = {};
   if (argsCandidate && typeof argsCandidate === "object" && !Array.isArray(argsCandidate)) {
     args = argsCandidate as Record<string, unknown>;
   } else {

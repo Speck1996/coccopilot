@@ -54,19 +54,57 @@ export const OPENING_BLOCK = '```coccopilot\n{ "tool": "list_dir", "args": { "pa
  */
 export const CONTINUE_PROMPT =
   "That's a lot of steps — please keep going: write the next `coccopilot` block(s), " +
-  "packing every independent call into this one reply, or the `done` block if the task is finished.";
+  "packing every independent call into this one reply, or the `done` block on its own if the task is finished " +
+  "and you have seen the checks pass.";
 
-export const DONE_PROMPT = "Let's wrap this task up. Reply with the `done` block now, and nothing else.";
+export const DONE_PROMPT =
+  "Let's wrap this task up. Reply with the `done` block now, and no other blocks; say in its summary what is " +
+  "finished and what is not.";
 
 /** Summary line used when a reply carried no call, shown in the result frame. */
 export const MISSED_CALL_SUMMARY = "your last reply did not contain a coccopilot block";
 
 /** Summary line for a fenced block that could not be parsed. */
-export const MALFORMED_SUMMARY = "your last reply had a coccopilot block that is not valid JSON";
+export const MALFORMED_SUMMARY =
+  "your last reply had a coccopilot block that is not valid JSON, so NOTHING from that reply was run";
 
-/** Detail line asking for a corrected reply after a malformed block. */
+/**
+ * Detail asking for a corrected reply after a malformed block. The whole reply is
+ * rejected, valid blocks included, so the model must resend all of it — "resend it"
+ * alone gets just the broken block back and the others are silently lost.
+ */
 export function malformedDetail(parseError: string): string {
-  return `${parseError}\n\nPlease resend it as valid JSON (double-quoted keys and strings, newlines escaped as \\n).`;
+  return (
+    `${parseError}\n\n` +
+    "None of the blocks in that reply ran, not even the valid ones. Please send the whole reply again, every " +
+    "block, with this one fixed: double-quoted keys and strings, and inside strings write newlines as \\n, " +
+    'quotes as \\" and backslashes as \\\\. If a string contains ``` lines, open the block with four ' +
+    "backticks (````coccopilot) and close it with four."
+  );
+}
+
+/** Appended to a result frame when a done block came with calls that failed. */
+export function doneRejected(failed: number): string {
+  return (
+    `Your \`done\` block was not accepted: ${failed === 1 ? "one block" : `${failed} blocks`} in the same reply ` +
+    "failed (see above), so the task is still open. Fix the failure and check the result; send `done` on its own " +
+    "once you have seen the checks pass."
+  );
+}
+
+/**
+ * One line telling the model which OS and shell `run_command` uses, so it picks the
+ * right commands (`sed -i ''` on macOS, no `ls`/`grep` on cmd.exe, and so on).
+ */
+export function systemLine(platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") return "System: Windows; run_command uses cmd.exe.";
+  if (platform === "darwin") return "System: macOS; run_command uses /bin/sh with BSD tools (e.g. `sed -i ''`).";
+  return `System: ${platform === "linux" ? "Linux" : platform}; run_command uses /bin/sh.`;
+}
+
+/** The project folder plus the system line, opening every task-bearing message. */
+export function projectHeader(workspaceRoot: string): string {
+  return `Project folder: ${workspaceRoot}\n${systemLine()}`;
 }
 
 /**
@@ -76,7 +114,7 @@ export function malformedDetail(parseError: string): string {
 export function reprimePrompt(systemPrompt: string, workspaceRoot: string): string {
   return (
     `${systemPrompt}\n\n---\n\n` +
-    `Project folder: ${workspaceRoot}\n\n` +
+    `${projectHeader(workspaceRoot)}\n\n` +
     "Resume the task. To get going, write exactly this block and coccopilot will list the project for you:\n\n" +
     OPENING_BLOCK
   );
@@ -91,14 +129,15 @@ export const STANDBY_MESSAGE = "Nothing was run. Let's pause here — I'll send 
  */
 export function idlePrimer(workspaceRoot: string): string {
   return (
-    `Project folder: ${workspaceRoot}\n\n` +
-    'If that all makes sense, reply with just "Ready" and wait — my first task is in the next message.'
+    `${projectHeader(workspaceRoot)}\n\n` +
+    'If that all makes sense, reply with just "Ready" and wait. My first task is in the next message; ' +
+    "do it, and every task after it, through `coccopilot` blocks."
   );
 }
 
 export function wrapUserTask(task: string, workspaceRoot: string): string {
   return (
-    `Project folder: ${workspaceRoot}\n\nTask: ${task}\n\n` +
+    `${projectHeader(workspaceRoot)}\n\nTask: ${task}\n\n` +
     "Start now with `coccopilot` blocks. If you're unsure where to begin, write:\n\n" +
     OPENING_BLOCK
   );
@@ -182,8 +221,9 @@ export const REFUSAL_NUDGE =
 
 /** No-call nudge for a reply that contained no block. */
 export const NO_TOOL_NUDGE =
-  "Your last reply had no `coccopilot` block, so there was nothing for coccopilot to run. Please continue " +
-  "with the next block(s) — or the `done` block if the task is finished. If you're unsure, start with:\n\n" +
+  "Your last reply had no `coccopilot` block, so there was nothing for coccopilot to run. Code shown in a " +
+  "```json, ```bash or other block is not run either — only `coccopilot` blocks are. Please continue with " +
+  "the next block(s), or the `done` block if the task is finished. If you're unsure, start with:\n\n" +
   OPENING_BLOCK;
 
 /** Corrective nudge for a reply that drifted into the product's built-in interpreter. */

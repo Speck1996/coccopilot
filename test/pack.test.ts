@@ -7,6 +7,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { encodeFile, INSTRUCTIONS_CLOSE, INSTRUCTIONS_OPEN, parseChanges } from "../src/pack/format.js";
 import { buildPack, excludeMatcher, renderTree } from "../src/pack/pack.js";
+import { crc32, packToDocx } from "../src/pack/docx.js";
+import { parsePackArgs, partPath, resolveFormat } from "../src/pack/commands.js";
+import { inflateRawSync } from "node:zlib";
 import { describePlan, planChanges, writePlan } from "../src/pack/apply.js";
 import { Workspace } from "../src/sandbox/workspace.js";
 import { emptyWorkspace, removeWorkspace, workspaceFromFixture } from "./support/harness.js";
@@ -305,6 +308,91 @@ test("e2e: coccopilot pack, then coccopilot apply from a file and from stdin", {
     const applied = await runCli(["apply", "-", "-y", "--no-clipboard", "--cwd", dir], await readFile(changes, "utf8"));
     assert.equal(applied.code, 0, applied.stdout);
     assert.equal(await readFile(join(dir, "src/farewell.js"), "utf8"), "export const bye = 1;\n");
+  } finally {
+    await removeWorkspace(dir);
+  }
+});
+
+/** Read the entries of a zip written by our writer (sizes are in the local headers). */
+function unzip(buf: Buffer): Map<string, Buffer> {
+  const out = new Map<string, Buffer>();
+  let at = 0;
+  while (buf.readUInt32LE(at) === 0x04034b50) {
+    const crc = buf.readUInt32LE(at + 14);
+    const size = buf.readUInt32LE(at + 18);
+    const nameLen = buf.readUInt16LE(at + 26);
+    const extraLen = buf.readUInt16LE(at + 28);
+    const name = buf.subarray(at + 30, at + 30 + nameLen).toString("utf8");
+    const start = at + 30 + nameLen + extraLen;
+    const data = inflateRawSync(buf.subarray(start, start + size));
+    assert.equal(crc32(data), crc, `crc of ${name}`);
+    out.set(name, data);
+    at = start + size;
+  }
+  assert.equal(buf.readUInt32LE(buf.length - 22), 0x06054b50, "end of central directory");
+  return out;
+}
+
+/** The text Word shows: one line per paragraph, tabs restored, entities decoded. */
+function docxText(xml: string): string {
+  const unescape = (t: string) =>
+    t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+  return [...xml.matchAll(/<w:p>(.*?)<\/w:p>/g)]
+    .map(([, p]) => [...p.matchAll(/<w:tab\/>|<w:t xml:space="preserve">(.*?)<\/w:t>/g)].map((m) => (m[1] === undefined ? "\t" : unescape(m[1]))).join(""))
+    .join("\n");
+}
+
+test("docx: a pack becomes a valid Word package with the pack text verbatim", async () => {
+  const dir = await emptyWorkspace();
+  try {
+    await writeFile(join(dir, "a.ts"), "if (a < b && c > d) {\n\treturn \"x\";\n}\n");
+    await writeFile(join(dir, "Makefile"), "all:\n\techo hi\n\n\n");
+    const pack = await buildPack({ root: dir, instructions: "@@@ FILE example.ts\nx\n@@@ END example.ts", documentKind: "Word document" });
+    assert.match(pack.parts[0], /This Word document is a snapshot/);
+
+    const files = unzip(packToDocx(pack.parts[0], "t", new Date(2026, 0, 2, 3, 4, 6)));
+    assert.deepEqual([...files.keys()].sort(), [
+      "[Content_Types].xml", "_rels/.rels", "docProps/core.xml", "word/_rels/document.xml.rels", "word/document.xml", "word/styles.xml",
+    ]);
+    const xml = files.get("word/document.xml")!.toString("utf8");
+    assert.equal(docxText(xml), pack.parts[0].replace(/\n$/, ""));
+    // FILE lines in the files section are headings; the format's own example is not.
+    assert.match(xml, /<w:pStyle w:val="Heading2"\/><\/w:pPr><w:r><w:t xml:space="preserve">@@@ FILE a\.ts/);
+    assert.doesNotMatch(xml, /Heading2"\/><\/w:pPr><w:r><w:t xml:space="preserve">@@@ FILE example/);
+    assert.match(xml, /<w:pStyle w:val="Code"\/>/);
+  } finally {
+    await removeWorkspace(dir);
+  }
+});
+
+test("docx: characters XML forbids are replaced, not emitted", () => {
+  const xml = unzip(packToDocx("@@@ FILES\nbell\u0007 nul\u0000 ok\n", "t")).get("word/document.xml")!.toString("utf8");
+  assert.doesNotMatch(xml, /[\u0000\u0007]/);
+  assert.match(xml, /bell\uFFFD nul\uFFFD ok/);
+});
+
+test("pack args: --format, --docx, and inference from the output extension", () => {
+  assert.equal(resolveFormat(parsePackArgs([])), "txt");
+  assert.equal(resolveFormat(parsePackArgs(["--format", "docx"])), "docx");
+  assert.equal(resolveFormat(parsePackArgs(["--docx", "task"])), "docx");
+  assert.equal(resolveFormat(parsePackArgs(["-o", "out/repo.DOCX"])), "docx");
+  assert.equal(resolveFormat(parsePackArgs(["-o", "repo.docx", "--format", "txt"])), "txt");
+  assert.throws(() => parsePackArgs(["--format", "pdf"]), /--format must be one of txt, docx/);
+  assert.equal(partPath("x/r.pack.docx", 2, 3, ".docx"), "x/r.pack.part2of3.docx");
+  assert.equal(partPath("x/r.pack.txt", 1, 2), "x/r.pack.part1of2.txt");
+  assert.equal(partPath("x/r.pack", 1, 2, ".docx"), "x/r.pack.part1of2.docx");
+});
+
+test("e2e: coccopilot pack --format docx writes a Word document", { timeout: 30_000 }, async () => {
+  const dir = await workspaceFromFixture();
+  try {
+    const packed = await runCli(["pack", "--format", "docx", "--no-clipboard", "--cwd", dir]);
+    assert.equal(packed.code, 0, packed.stdout);
+    const docx = join(dir, ".coccopilot", `${dir.split("/").pop()}.pack.docx`);
+    assert.ok(existsSync(docx), packed.stdout);
+    assert.match(packed.stdout, /a Word document holding a snapshot/);
+    const text = docxText(unzip(await readFile(docx)).get("word/document.xml")!.toString("utf8"));
+    assert.match(text, /@@@ FILE src\/greet\.js \[\d+ lines?\]/);
   } finally {
     await removeWorkspace(dir);
   }

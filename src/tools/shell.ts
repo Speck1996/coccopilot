@@ -247,14 +247,20 @@ async function runShell(
   });
 }
 
+/** The command as it appears in a result header, so batched results map back to their call. */
+function quoteCommand(command: string): string {
+  const one = command.replace(/\s+/g, " ").trim();
+  return `\`${one.length > 80 ? one.slice(0, 77) + "..." : one}\``;
+}
+
 export const runCommandTool: Tool = {
   name: "run_command",
   description:
-    "Run a shell command in the workspace root and return its exit code and combined stdout/stderr. " +
-    "Use this for tests, type-checking, linting, builds, git, and installing dependencies. " +
-    "If a command asks an interactive question (e.g. a y/n confirmation), coccopilot asks you for the " +
-    "answer rather than letting it hang.",
-  signature: "run_command(command: string, timeout_ms?: number) — runs in the workspace root",
+    "Run a shell command in the project folder and return its exit code and combined stdout/stderr " +
+    "(long output keeps only the last 200 lines). Use it for tests, type-checking, linting, builds, git and " +
+    "installing dependencies. The command must finish by itself: it is stopped at timeout_ms (default 60000, " +
+    "max 120000), so no dev servers, watch modes or editors; use non-interactive flags such as --yes or CI=1.",
+  signature: "run_command(command: string, timeout_ms?: number) — runs in the project folder",
   async run(call, ctx) {
     const command = call.args.command;
     if (typeof command !== "string" || command.trim().length === 0) {
@@ -311,7 +317,7 @@ export const runCommandTool: Tool = {
 
     return {
       ok: !outcome.timedOut && outcome.code === 0,
-      summary: `run_command: ${status}`,
+      summary: `run_command ${quoteCommand(command)}: ${status}`,
       detail,
     };
   },
