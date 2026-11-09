@@ -25,7 +25,7 @@ function resolvePromptsDir(): string {
   return candidates[0];
 }
 
-const promptsDir = resolvePromptsDir();
+export const promptsDir = resolvePromptsDir();
 
 /** Header used when framing results for the model. */
 export const RESULT_LABEL = "TOOL RESULT";
@@ -35,9 +35,10 @@ export const RESULT_LABEL = "TOOL RESULT";
  * and describes coccopilot truthfully — Copilot writes blocks, a local program runs
  * them — so there is no capability claim for the chat product to refuse.
  */
-export async function loadSystemPrompt(toolsBlock: string): Promise<string> {
+export async function loadSystemPrompt(toolsBlock: string, skillsBlock = ""): Promise<string> {
   const template = await readFile(resolve(promptsDir, "agent.md"), "utf8");
-  return template.replace("{{TOOLS}}", toolsBlock);
+  const prompt = template.replace("{{TOOLS}}", toolsBlock);
+  return skillsBlock ? `${prompt.trimEnd()}\n\n${skillsBlock}\n` : prompt;
 }
 
 /** Load another prompt template from `prompts/` by file name. */

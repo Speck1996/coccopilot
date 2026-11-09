@@ -9,6 +9,7 @@ import { describePlan, failureReport, planChanges, writePlan } from "./apply.js"
 import { INSTRUCTIONS_CLOSE, INSTRUCTIONS_OPEN, parseChanges } from "./format.js";
 import { packToDocx } from "./docx.js";
 import { buildPack, DEFAULT_MAX_FILE_BYTES } from "./pack.js";
+import { parseSkillList, renderSkills, resolveSkills, type Skill } from "../agent/skills.js";
 
 export const PACK_FORMATS = ["txt", "docx"] as const;
 export type PackFormat = (typeof PACK_FORMATS)[number];
@@ -31,6 +32,9 @@ export interface PackArgs {
   format?: PackFormat;
   clipboard: boolean;
   task: string;
+  /** Skill names (undefined = COCCOPILOT_SKILLS) and custom skill files. */
+  skills?: string[];
+  skillFiles: string[];
 }
 
 export interface ApplyArgs {
@@ -51,7 +55,7 @@ function takeValue(argv: string[], i: number, flag: string): string {
 }
 
 export function parsePackArgs(argv: string[]): PackArgs {
-  const args: PackArgs = { exclude: [], defaultExcludes: true, clipboard: true, task: "" };
+  const args: PackArgs = { exclude: [], defaultExcludes: true, clipboard: true, task: "", skillFiles: [] };
   const positionals: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -67,6 +71,8 @@ export function parsePackArgs(argv: string[]): PackArgs {
       args.format = v as PackFormat;
     } else if (a === "--docx") args.format = "docx";
     else if (a === "--no-clipboard") args.clipboard = false;
+    else if (a === "--skills") args.skills = [...(args.skills ?? []), ...parseSkillList(takeValue(argv, ++i, a))];
+    else if (a === "--skill") args.skillFiles.push(takeValue(argv, ++i, a));
     else if (a.startsWith("-")) throw new Error(`unknown flag for pack: ${a}`);
     else positionals.push(a);
   }
@@ -114,6 +120,8 @@ export function printPackUsage(): void {
       `  --max-file-bytes <n>     list larger files without their content (default: ${DEFAULT_MAX_FILE_BYTES})`,
       "  --max-chars <n>          split the pack into parts of about n characters (default: one file)",
       "  --no-clipboard           don't copy the kick-off message",
+      "  --skills <list>          roles for Copilot (developer, simplifier, reviewer, documenter, all, …)",
+      "  --skill <file.md>        load a custom skill file and use it (repeatable)",
       "",
       "apply options:",
       "  --cwd <dir>              workspace root (default: current directory)",
@@ -139,7 +147,13 @@ export function resolveFormat(args: Pick<PackArgs, "format" | "output">): PackFo
 }
 
 /** The message pasted into the chat with the uploaded pack. */
-export function kickoffMessage(fileNames: string[], instructions: string, task: string, format: PackFormat = "txt"): string {
+export function kickoffMessage(
+  fileNames: string[],
+  instructions: string,
+  task: string,
+  format: PackFormat = "txt",
+  skills: Skill[] = [],
+): string {
   const files = fileNames.map((f) => `"${f}"`).join(", ");
   const what = format === "docx" ? "a Word document holding a snapshot" : "a plain-text snapshot";
   return [
@@ -151,6 +165,7 @@ export function kickoffMessage(fileNames: string[], instructions: string, task: 
     INSTRUCTIONS_OPEN,
     instructions.trim(),
     INSTRUCTIONS_CLOSE,
+    ...(skills.length ? ["", renderSkills(skills, "pack")] : []),
     "",
     task ? `My task: ${task}` : "Wait for my task.",
   ].join("\n");
@@ -159,6 +174,8 @@ export function kickoffMessage(fileNames: string[], instructions: string, task: 
 export async function runPack(args: PackArgs): Promise<void> {
   const root = resolve(args.cwd ?? process.cwd());
   const instructions = await loadPrompt("pack.md");
+  const skills = await resolveSkills(root, args.skills ?? parseSkillList(process.env.COCCOPILOT_SKILLS), args.skillFiles);
+  if (skills.length) log(`skills: ${skills.map((s) => s.name).join(", ")}`);
   const output = args.output ? resolve(args.output) : undefined;
   const format = resolveFormat(args);
   const { ext, kind } = FORMAT_INFO[format];
@@ -191,7 +208,7 @@ export async function runPack(args: PackArgs): Promise<void> {
   for (const e of pack.entries.filter((e) => e.skipped)) log(`  listed only: ${e.path} (${e.skipped})`);
   for (const p of paths) log(`wrote ${p}`);
 
-  const message = kickoffMessage(paths.map((p) => basename(p)), instructions, args.task, format);
+  const message = kickoffMessage(paths.map((p) => basename(p)), instructions, args.task, format, skills);
   const clipboard = args.clipboard ? await detectClipboard() : null;
   const copied = clipboard ? await clipboard.write(message).then(() => true, () => false) : false;
 

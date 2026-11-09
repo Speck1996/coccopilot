@@ -10,6 +10,14 @@ import { HumanTerminal } from "./human/terminal.js";
 import { createChannel, type CopilotChannel } from "./human/channel.js";
 import { runBridge } from "./agent/bridge.js";
 import { parseApplyArgs, parsePackArgs, printPackUsage, runApply, runPack } from "./pack/commands.js";
+import {
+  describeSkills,
+  discoverSkills,
+  parseSkillList,
+  PROJECT_SKILLS_DIRNAME,
+  resolveSkills,
+  userSkillsDir,
+} from "./agent/skills.js";
 
 interface CliArgs {
   task: string;
@@ -27,6 +35,9 @@ interface CliArgs {
   cache: boolean;
   cachePath?: string;
   sentinel?: string;
+  /** undefined = not given on the command line (fall back to COCCOPILOT_SKILLS). */
+  skills?: string[];
+  skillFiles: string[];
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -45,6 +56,8 @@ function parseArgs(argv: string[]): CliArgs {
   let cache = true;
   let cachePath: string | undefined;
   let sentinel: string | undefined;
+  let skills: string[] | undefined;
+  const skillFiles: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -60,6 +73,8 @@ function parseArgs(argv: string[]): CliArgs {
     else if (arg === "--no-cache") cache = false;
     else if (arg === "--cache-path") cachePath = argv[++i];
     else if (arg === "--sentinel") sentinel = argv[++i];
+    else if (arg === "--skills") skills = [...(skills ?? []), ...parseSkillList(argv[++i])];
+    else if (arg === "--skill") skillFiles.push(argv[++i]);
     else if (arg === "--yes" || arg === "-y") yes = true;
     else if (arg === "--continue" || arg === "-c") continueSession = true;
     else if (arg === "--help" || arg === "-h") {
@@ -86,6 +101,8 @@ function parseArgs(argv: string[]): CliArgs {
     cache,
     cachePath,
     sentinel,
+    skills,
+    skillFiles,
   };
 }
 
@@ -112,6 +129,9 @@ function printUsage(): void {
       "  --max-turns <n>        steps per continuation (default: 25)",
       "  --continuations <n>    times the step budget may be extended before sealing (default: 5)",
       "  --max-message-chars <n> clipboard cap: split (clipboard mode) or skip the copy (cache mode) above n chars (default: 8000, 0 disables)",
+      "  --skills <list>        roles for Copilot, comma-separated: developer, simplifier, reviewer,",
+      "                         documenter, a custom skill's name, or all (see: coccopilot skills)",
+      "  --skill <file.md>      load a custom skill file and use it (repeatable)",
       "  --dry-run              probe the clipboard and print the hand-off mode; send nothing",
       "  --no-primer            skip priming (assumes the thread already has the protocol)",
       "  -y, --yes              auto-approve non-routine shell commands",
@@ -122,6 +142,7 @@ function printUsage(): void {
       "  doctor                 check for required/external tools and show install hints",
       "  install <tool>         install a known tool (pytest, pyspark, python, git, …)",
       "  install --all          install every known tool that is missing",
+      "  skills [<name>]        list the available skills, or print one",
       "  pack                   encode the workspace into one .txt file to upload to Copilot",
       "  apply                  apply the change set from Copilot's reply (see: coccopilot pack --help)",
     ].join("\n"),
@@ -305,8 +326,36 @@ async function runInstall(rest: string[], autoApprove: boolean): Promise<void> {
   }
 }
 
+async function runSkills(rest: string[]): Promise<void> {
+  let cwd = process.cwd();
+  const names: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === "--cwd") cwd = rest[++i];
+    else names.push(rest[i]);
+  }
+  const available = await discoverSkills(cwd);
+  if (names.length === 0) {
+    console.log("[coccopilot] available skills (use with --skills a,b or --skills all):");
+    console.log(describeSkills(available.values()));
+    console.log(
+      `\n  custom skills: add <name>.md to ${PROJECT_SKILLS_DIRNAME}/ in the project or to ${userSkillsDir()},\n` +
+        "  or pass a file with --skill <file.md>. A custom skill with a built-in's name replaces it.",
+    );
+    return;
+  }
+  for (const name of names) {
+    const skill = available.get(name.toLowerCase());
+    if (!skill) throw new Error(`unknown skill "${name}" (available: ${[...available.keys()].join(", ")})`);
+    console.log(`# ${skill.title} (@${skill.name}) — ${skill.path}\n\n${skill.body}\n`);
+  }
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  if (argv[0] === "skills") {
+    await runSkills(argv.slice(1));
+    return;
+  }
   if (argv[0] === "doctor") {
     await runDoctor();
     return;
@@ -346,12 +395,16 @@ async function main(): Promise<void> {
     cache: args.cache,
     cachePath: args.cachePath,
     sentinel: args.sentinel,
+    skills: args.skills,
+    skillFiles: args.skillFiles,
   });
+  const skills = await resolveSkills(config.workspace, config.skills, config.skillFiles);
 
   const log = (msg: string) => console.log(`[coccopilot] ${msg}`);
   log(`webapp:    ${config.webappUrl}`);
   log(`workspace: ${config.workspace}`);
   log(`session:   ${config.continueSession ? "continue previous" : "fresh"}`);
+  if (skills.length) log(`skills:    ${skills.map((s) => s.name).join(", ")}`);
 
   const workspace = new Workspace(config.workspace);
   const registry = defaultRegistry();
@@ -402,6 +455,7 @@ async function main(): Promise<void> {
       maxTurns: config.maxTurns,
       maxContinuations: config.maxContinuations,
       injectPrimer: args.injectPrimer && !config.continueSession,
+      skills,
       log,
     });
 

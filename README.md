@@ -243,6 +243,50 @@ The kick-off message repeats the change-format instructions, because Copilot may
 retrieve parts of a large uploaded file. Applying a pack itself works too: it recreates
 the snapshot, which makes `apply` double as an unpacker.
 
+### Skills: give Copilot roles (`--skills`)
+
+A skill is a role Copilot takes on for the session. The selected skills are added to the
+primer (and to the pack kick-off message) as a **Roles** section. Four are built in:
+
+| Skill | Role |
+| --- | --- |
+| `developer` | Machine-learning / Python engineer, responsible for the change working. Applies *Clean Code*, *Refactoring Guru* (smells, small refactorings, patterns only when they pay) and *Designing Data-Intensive Applications* (idempotent, reproducible data steps, explicit schemas), plus ML hygiene (no data leakage, seeds, config over constants). Paired with the reviewer as QA: when both are active it hands each change to the reviewer before `done`. |
+| `simplifier` | Seasoned developer who flattens and trims code structure, behavior unchanged, so new developers can approach it. |
+| `reviewer` | QA tester and reviewer: hunts for bugs, adds tests (a failing test per bug, edge cases), and ends with a ranked list of concerns. |
+| `documenter` | Keeps README, docstrings and CLI help in step with the code and maintains a minimal getting-started guide. |
+
+```bash
+coccopilot --skills developer,reviewer --cwd ./ml-project "add early stopping to the trainer"
+coccopilot --skills all --cwd ./myapp
+coccopilot pack --skills simplifier,documenter --cwd ./myapp "make the CLI module approachable"
+coccopilot skills              # list available skills (built-in and custom)
+coccopilot skills reviewer     # print one skill's instructions
+```
+
+With several skills, Copilot works through them in the order given on every task. Start a
+task with a role tag to use just one role for it, e.g. `@reviewer look for bugs in the
+parser`. Skills are off by default, so the primer is unchanged unless you ask for them.
+
+**Custom skills** are markdown files with an optional frontmatter header:
+
+```markdown
+---
+name: data-engineer
+title: The Data Engineer
+description: Owns the ingestion pipelines.
+---
+You are the Data Engineer. Keep every pipeline step idempotent…
+```
+
+coccopilot picks them up from `.coccopilot-skills/` in the project (commit it to share
+skills with your team) and from `~/.coccopilot/skills/` (override with
+`COCCOPILOT_SKILLS_DIR`); select them by name with `--skills`. A custom skill with a
+built-in's name replaces it. `--skill <file.md>` loads and activates a file directly.
+
+Skills make the primer longer than the default clipboard cap (8000 chars), so the primer
+goes through the cache file: attach `.coccopilot/cache.md` (its path is on your clipboard).
+Later turns are unaffected. With `--no-primer` the skills are not sent.
+
 ### Why human-in-the-loop
 
 Automating the Copilot web app — driving the composer, injecting messages, and reading
@@ -317,6 +361,8 @@ you.
 | `--max-turns <n>` | Steps per continuation. Default: `25`. |
 | `--continuations <n>` | Times the step budget may be extended before sealing. Default: `5`. |
 | `--max-message-chars <n>` | Clipboard cap: in cached mode, frames above `n` chars skip the clipboard copy; in `--no-cache` clipboard mode they are split into numbered parts. Default: `8000`; `0` disables. |
+| `--skills <list>` | Roles for Copilot, comma-separated: `developer`, `simplifier`, `reviewer`, `documenter`, a custom skill's name, or `all`. See [Skills](#skills-give-copilot-roles---skills). |
+| `--skill <file.md>` | Load a custom skill file and use it (repeatable). |
 | `--no-primer` | Skip priming. Use when the thread already contains the protocol (pair with `-c`). |
 | `--dry-run` | Detect the clipboard backend and print the hand-off mode; send nothing. |
 | `-y`, `--yes` | Auto-approve non-routine shell commands (no approval prompt at all). |
@@ -490,6 +536,8 @@ Environment variables (flags take precedence):
 | `COCCOPILOT_MAX_MESSAGE_CHARS` | `8000` | Clipboard cap: skip the copy (cache mode) or split into parts (`--no-cache`) above this (`0` disables) |
 | `COCCOPILOT_YES` | `false` | Auto-approve shell commands |
 | `COCCOPILOT_CONTINUE` | `false` | Continue the previous conversation |
+| `COCCOPILOT_SKILLS` | (none) | Default `--skills` list, e.g. `developer,reviewer` |
+| `COCCOPILOT_SKILLS_DIR` | `~/.coccopilot/skills` | Folder of personal custom skills |
 
 `coccopilot doctor` and `coccopilot install <tool>` are also available as subcommands;
 they honor `-y` for installs that require approval.
@@ -512,6 +560,7 @@ src/
     protocol.ts          tool-call parsing (single, batched, tolerant)
     prompt.ts            system prompt assembly + result framing
     drift.ts             detects built-in sandbox/interpreter drift in a reply
+    skills.ts            skill discovery (built-in, user, project, file) and the Roles section
   pack/
     format.ts            pack / change-set text format: encoder and tolerant parser
     pack.ts              file selection, tree rendering, pack assembly and splitting
@@ -530,11 +579,13 @@ src/
     policy.ts            command deny-list + approval
 prompts/agent.md         the single prompt sent to Copilot
 prompts/pack.md          the change-format instructions embedded in a pack
+prompts/skills/          built-in skills: developer, simplifier, reviewer, documenter
 test/
   scenarios.test.ts      explain / create-project / refactor task simulations
   ux.test.ts             nudge, malformed-block, refusal, drift, budget-recovery simulations
   misread.test.ts        replies a model can get subtly wrong: nested fences, JSON slips, stray snippets
   cache.test.ts          cache file write/overwrite, clipboard cap, sentinel + bare-Enter inbound
+  skills.test.ts         skill discovery, overrides, selection and rendering into prompts
   pack.test.ts           pack round-trip, tree, splitting, change-set parsing and apply
   clipboard.test.ts      clipboard guards, manual sentinel, one-time instructions, status line
   e2e.test.ts            spawns the real CLI (manual and cache modes) over piped stdin

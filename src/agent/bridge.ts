@@ -24,6 +24,7 @@ import {
   idlePrimer,
 } from "./prompt.js";
 import { detectDrift } from "./drift.js";
+import { renderSkills, type Skill } from "./skills.js";
 
 export interface BridgeOptions {
   /** Optional task to seed the first turn; when omitted the session opens idle. */
@@ -44,6 +45,8 @@ export interface BridgeOptions {
   onToolCall?: (call: ToolCall, result?: ToolResult) => void;
   /** Prime a fresh conversation with the protocol before going idle. */
   injectPrimer?: boolean;
+  /** Roles Copilot takes on for the session, appended to the primer. */
+  skills?: Skill[];
 }
 
 export interface Bridge {
@@ -265,9 +268,10 @@ export function runBridge(opts: BridgeOptions): Bridge {
   }
 
   async function prime(): Promise<void> {
-    systemPrompt = await loadSystemPrompt(registry.describe());
+    systemPrompt = await loadSystemPrompt(registry.describe(), renderSkills(opts.skills ?? []));
 
     if (opts.injectPrimer === false) {
+      if (opts.skills?.length) log("primer disabled: the skills are not sent (they are part of the primer)");
       if (opts.task) {
         log("primer disabled; sending only the task (assumes a primed thread)");
         state = "working";

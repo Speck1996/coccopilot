@@ -8,6 +8,11 @@
 
 ## Backlog
 
+- **Skills follow-ups.** Trial the built-in skills on M365 Copilot (does it switch roles
+  and honor `@role` tags?); consider a compact rendering so a one- or two-skill primer
+  fits the 8000-char clipboard cap; consider switching roles mid-session from the
+  terminal without re-priming.
+
 - **Pack mode follow-ups.** Trial `--max-chars` parts on a repo too large for one upload;
   check that follow-up replies in the same chat build on earlier change sets; consider
   `apply` printing the git diff after writing.
@@ -43,6 +48,14 @@
   driver to exercise the bridge deterministically in CI without a browser.
 
 ## Done
+
+- **Skills (roles for Copilot).** `--skills developer,simplifier,reviewer,documenter|all`
+  adds a Roles section to the primer and the pack kick-off. Built-ins live in
+  `prompts/skills/`: the developer (ML/Python; Clean Code, Refactoring Guru, DDIA; paired
+  with the reviewer as QA), the simplifier, the reviewer (bugs, tests, concerns) and the
+  documenter. Custom skills are markdown files in `.coccopilot-skills/`,
+  `~/.coccopilot/skills/` or passed with `--skill <file>`; `coccopilot skills` lists them.
+  `@role` at the start of a task limits it to one role. Off by default.
 
 - **Pack as a Word document.** `coccopilot pack --format docx` (or `--docx`, or an
   `-o` ending in `.docx`) writes the pack as a dependency-free `.docx`, one paragraph

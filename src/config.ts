@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { resolveCachePath } from "./human/cache.js";
+import { parseSkillList } from "./agent/skills.js";
 
 export interface Config {
   workspace: string;
@@ -32,6 +33,10 @@ export interface Config {
    * it is copied, so a turn needs no terminal interaction.
    */
   watch: boolean;
+  /** Names of the skills (roles) to put in the primer; see `coccopilot skills`. */
+  skills: string[];
+  /** Custom skill files to load and activate. */
+  skillFiles: string[];
 }
 
 function bool(v: string | undefined, fallback: boolean): boolean {
@@ -81,5 +86,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     autoApprove: overrides.autoApprove ?? bool(env.COCCOPILOT_YES, false),
     continueSession: overrides.continueSession ?? bool(env.COCCOPILOT_CONTINUE, false),
     watch: overrides.watch ?? bool(env.COCCOPILOT_WATCH, true),
+    skills: overrides.skills ?? parseSkillList(env.COCCOPILOT_SKILLS),
+    skillFiles: overrides.skillFiles ?? [],
   };
 }
