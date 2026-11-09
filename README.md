@@ -211,10 +211,11 @@ more reliably than they count line numbers. `apply`:
 | --- | --- |
 | `-o, --output <path>` | Pack file. Default: `<workspace>/.coccopilot/<name>.pack.<txt\|docx>` (gitignored). |
 | `--format txt\|docx` | Plain text or a Word document (`--docx` for short). Default: from `-o`'s extension, else `txt`. |
+| `--include <glob>` | Inline only matching files or folders. Repeat it or use commas to pick several: `--include src/api --include src/db,README.md`. A plain folder path includes everything under it. The rest stay in the tree as "not included", so Copilot sees the whole layout and can ask for a file. |
 | `--exclude <glob>` | Leave matching files out (repeatable; `dir/` excludes a directory). |
 | `--no-default-excludes` | Also inline lockfiles, minified bundles and source maps. |
 | `--max-file-bytes <n>` | List larger files without content. Default: `200000`. |
-| `--max-chars <n>` | Split into parts of about `n` characters (files are never split). |
+| `--max-chars <n>` | Split into parts of at most about `n` characters (files are never split). Default: `350000` (~100k tokens, what Copilot's document reader takes in full); `0` writes one file. |
 | `--no-clipboard` | Print the kick-off message instead of copying it. |
 
 | `apply` option | Description |
@@ -236,7 +237,19 @@ rather than its full text. `--format docx` writes the same pack as a Word docume
 which Copilot reads through its document pipeline: one paragraph per pack line (so the
 markers and line counts survive a copy out of Word), `@@@ FILE` lines as headings for an
 outline, code in a monospace style. It is generated without dependencies (a minimal
-OOXML package zipped in-process); `--max-chars` splitting works the same way. `apply`
+OOXML package zipped in-process); `--max-chars` splitting works the same way.
+
+**Large repositories are split.** Copilot's document reader drops the tail of a large
+upload: a 40k-line repository packed as one file came back "truncated". So the pack is
+split by default into parts of at most 350k characters (~100k tokens). That limit is the
+document reader's, not the context window's: the truncated 40k-line pack was ~430k tokens,
+well under Copilot's ~1M-token window. The window holds all the parts together, so a pack
+may total up to ~900k tokens (10% is left for the chat); `pack` warns above that (the header and folder tree count
+toward part 1), each ending in `@@@ EOF · end of part n/N`. The kick-off message tells
+Copilot to look for that line, so it can say which part it could not read in full.
+Upload every part. `pack` warns when a part is still too large (a single huge file).
+To keep a large repository in **one** file, pack only the area the task touches:
+`coccopilot pack --include src/billing --include "src/shared/**/*.ts" --docx "<task>"`. `apply`
 does not read `.docx` packs back; it never needs to, Copilot's replies are plain text.
 
 The kick-off message repeats the change-format instructions, because Copilot may only

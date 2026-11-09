@@ -6,9 +6,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { encodeFile, INSTRUCTIONS_CLOSE, INSTRUCTIONS_OPEN, parseChanges } from "../src/pack/format.js";
-import { buildPack, excludeMatcher, renderTree } from "../src/pack/pack.js";
+import { buildPack, excludeMatcher, includeMatcher, renderTree } from "../src/pack/pack.js";
 import { crc32, packToDocx } from "../src/pack/docx.js";
-import { parsePackArgs, partPath, resolveFormat } from "../src/pack/commands.js";
+import { kickoffMessage, parsePackArgs, partPath, resolveFormat } from "../src/pack/commands.js";
 import { inflateRawSync } from "node:zlib";
 import { describePlan, planChanges, writePlan } from "../src/pack/apply.js";
 import { Workspace } from "../src/sandbox/workspace.js";
@@ -84,6 +84,57 @@ test("pack: --max-chars splits into parts without splitting a file", async () =>
   } finally {
     await removeWorkspace(src);
   }
+});
+
+test("pack: parts stay within --max-chars, header and tree included", async () => {
+  const dir = await emptyWorkspace();
+  try {
+    for (let i = 0; i < 60; i++) await writeFile(join(dir, `f${String(i).padStart(2, "0")}.ts`), `export const v${i} = "${"x".repeat(900)}";\n`.repeat(4));
+    const maxChars = 10_000;
+    const pack = await buildPack({ root: dir, instructions: "y".repeat(3000), maxChars });
+    assert.ok(pack.parts.length > 1);
+    for (const part of pack.parts) assert.ok(part.length <= maxChars, `part of ${part.length} chars`);
+    const total = pack.parts.length;
+    pack.parts.forEach((part, i) => assert.match(part, new RegExp(`@@@ EOF · end of part ${i + 1}/${total}\\n$`)));
+    assert.equal(pack.parts.flatMap((p) => parseChanges(p).ops).length, 60);
+  } finally {
+    await removeWorkspace(dir);
+  }
+});
+
+test("pack: the kick-off message names every part and how to spot a cut-off one", () => {
+  const one = kickoffMessage(["r.pack.docx"], "I", "", "docx");
+  assert.match(one, /ends with an "@@@ EOF" line/);
+  const many = kickoffMessage(["a.docx", "b.docx", "c.docx"], "I", "", "docx");
+  assert.match(many, /3 parts of a Word document/);
+  assert.match(many, /end of part <n>\/3/);
+});
+
+test("pack: --include inlines only matching files and lists the rest", async () => {
+  const dir = await emptyWorkspace();
+  try {
+    await mkdir(join(dir, "src/billing/deep"), { recursive: true });
+    await mkdir(join(dir, "src/other"), { recursive: true });
+    await writeFile(join(dir, "src/billing/a.ts"), "a\n");
+    await writeFile(join(dir, "src/billing/deep/b.ts"), "b\n");
+    await writeFile(join(dir, "src/other/c.ts"), "c\n");
+    await writeFile(join(dir, "README.md"), "r\n");
+    const pack = await buildPack({ root: dir, instructions: "x", include: ["src/billing/deep", "src/billing/a.ts", "*.md"] });
+    const ops = parseChanges(pack.parts[0]).ops.map((o) => (o.kind === "file" ? o.path : ""));
+    assert.deepEqual(ops.sort(), ["README.md", "src/billing/a.ts", "src/billing/deep/b.ts"]);
+    assert.match(pack.parts[0], /c\.ts  \(not included: outside --include\)/);
+  } finally {
+    await removeWorkspace(dir);
+  }
+});
+
+test("pack: include globs", () => {
+  const inc = includeMatcher(["src/billing", "lib/", "**/*.sql"]);
+  assert.ok(inc("src/billing/x.ts"));
+  assert.ok(!inc("src/billing2/x.ts"));
+  assert.ok(inc("lib/a/b.js"));
+  assert.ok(inc("db/m/001.sql"));
+  assert.ok(!inc("src/other.ts"));
 });
 
 test("pack: the tree collapses single-child directory chains", () => {
@@ -371,12 +422,19 @@ test("docx: characters XML forbids are replaced, not emitted", () => {
   assert.match(xml, /bell\uFFFD nul\uFFFD ok/);
 });
 
+test("docx: a lone CR does not add a paragraph the line count lacks", () => {
+  const xml = unzip(packToDocx("@@@ FILES\na\rb\r\nc\n", "t")).get("word/document.xml")!.toString("utf8");
+  assert.equal(docxText(xml), "@@@ FILES\na\uFFFDb\nc");
+});
+
 test("pack args: --format, --docx, and inference from the output extension", () => {
   assert.equal(resolveFormat(parsePackArgs([])), "txt");
   assert.equal(resolveFormat(parsePackArgs(["--format", "docx"])), "docx");
   assert.equal(resolveFormat(parsePackArgs(["--docx", "task"])), "docx");
   assert.equal(resolveFormat(parsePackArgs(["-o", "out/repo.DOCX"])), "docx");
   assert.equal(resolveFormat(parsePackArgs(["-o", "repo.docx", "--format", "txt"])), "txt");
+  assert.deepEqual(parsePackArgs(["--include", "src/a", "--include", "*.md", "task"]).include, ["src/a", "*.md"]);
+  assert.deepEqual(parsePackArgs(["--include", "src/api, src/db,README.md", "--include", "lib/"]).include, ["src/api", "src/db", "README.md", "lib/"]);
   assert.throws(() => parsePackArgs(["--format", "pdf"]), /--format must be one of txt, docx/);
   assert.equal(partPath("x/r.pack.docx", 2, 3, ".docx"), "x/r.pack.part2of3.docx");
   assert.equal(partPath("x/r.pack.txt", 1, 2), "x/r.pack.part1of2.txt");

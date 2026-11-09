@@ -12,8 +12,12 @@ import { MARKER } from "./format.js";
 
 const W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
-/** Characters XML 1.0 forbids (controls other than tab/LF/CR, lone surrogates, U+FFFE/F). */
-const INVALID_XML = /[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+/**
+ * Characters XML 1.0 forbids (controls other than tab/LF, lone surrogates, U+FFFE/F),
+ * plus a lone CR: Word would break the paragraph there, adding a line the pack's
+ * `[<n> lines]` count does not have.
+ */
+const INVALID_XML = /[\x00-\x08\x0B-\x1F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
 function escapeXml(text: string): string {
   return text
@@ -41,7 +45,8 @@ const DIRECTIVE = new RegExp(`^${MARKER} (\\S+)`);
 
 /** Map each pack line to a paragraph style. */
 export function documentXml(packText: string): string {
-  const lines = packText.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
+  // Only CRLF is a line break here; a lone CR inside a line is replaced by escapeXml.
+  const lines = packText.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
   let inCode = false; // after "@@@ TREE": the tree and the files are code
   const body = lines.map((line, index) => {
     const directive = DIRECTIVE.exec(line)?.[1];

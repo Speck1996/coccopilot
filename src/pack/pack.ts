@@ -20,14 +20,39 @@ export const DEFAULT_EXCLUDES = [
 
 export const DEFAULT_MAX_FILE_BYTES = 200_000;
 
+/** Code runs about 3.5 characters per token. */
+export const CHARS_PER_TOKEN = 3.5;
+
+/**
+ * Copilot's context window holds ~1M tokens; 10% is left for the kick-off message,
+ * the conversation and Copilot's change sets. This budget is for the whole pack, all
+ * parts together.
+ */
+export const CONTEXT_TOKENS = 1_000_000;
+export const PACK_TOKEN_BUDGET = 900_000;
+
+/**
+ * Default part size. This limit comes from Copilot's document reader, not its context
+ * window: one 40k-line repository (~1.5M characters, ~430k tokens, well under 1M) came
+ * back "truncated" as a single upload, while a ~280k-character pack was read in full.
+ * Each part stays near that size, and the context window holds all the parts.
+ */
+export const DEFAULT_MAX_CHARS = 350_000;
+
 export interface PackOptions {
   root: string;
+  /**
+   * Only inline files matching these globs (all files when empty); the others stay in
+   * the tree as "not included". Same syntax as `exclude`, and a plain directory path
+   * ("src/billing") includes everything under it.
+   */
+  include?: string[];
   /** Extra exclude globs. A pattern without "/" matches any path segment. */
   exclude?: string[];
   /** Apply DEFAULT_EXCLUDES (lockfiles, minified bundles, source maps). */
   defaultExcludes?: boolean;
   maxFileBytes?: number;
-  /** Split into parts of about this many characters; 0 = one file. */
+  /** Split into parts of at most about this many characters; 0 = one file. Default: no split. */
   maxChars?: number;
   /** Absolute paths that must never be packed (e.g. the pack output itself). */
   skipPaths?: string[];
@@ -91,6 +116,15 @@ export async function listFiles(root: string): Promise<string[]> {
   return unique.sort((a, b) => a.localeCompare(b));
 }
 
+/** Compile include globs: like excludeMatcher, plus a plain path also matches what is under it. */
+export function includeMatcher(patterns: string[]): (path: string) => boolean {
+  const dirs = patterns
+    .map((p) => p.trim())
+    .filter((p) => p && !p.endsWith("/") && !/[*?]/.test(p))
+    .map((p) => `${p}/`);
+  return excludeMatcher([...patterns, ...dirs]);
+}
+
 /** Compile exclude globs: "dir/" excludes a directory, a "/"-less pattern any segment. */
 export function excludeMatcher(patterns: string[]): (path: string) => boolean {
   const res = patterns.map((raw) => {
@@ -124,6 +158,7 @@ export async function collectEntries(opts: PackOptions): Promise<PackEntry[]> {
   const defaults = opts.defaultExcludes === false ? [] : DEFAULT_EXCLUDES;
   const isDefaultExcluded = excludeMatcher(defaults);
   const isExcluded = excludeMatcher(opts.exclude ?? []);
+  const isIncluded = opts.include?.length ? includeMatcher(opts.include) : () => true;
   const skip = new Set((opts.skipPaths ?? []).map((p) => resolve(p)));
 
   const entries: PackEntry[] = [];
@@ -133,7 +168,8 @@ export async function collectEntries(opts: PackOptions): Promise<PackEntry[]> {
     const info = await stat(abs).catch(() => null);
     if (!info?.isFile()) continue; // deleted but still tracked, or a symlink to a dir
     const entry: PackEntry = { path, bytes: info.size };
-    if (isDefaultExcluded(path)) entry.skipped = "generated";
+    if (!isIncluded(path)) entry.skipped = "outside --include";
+    else if (isDefaultExcluded(path)) entry.skipped = "generated";
     else if (info.size > maxBytes) entry.skipped = `${formatBytes(info.size)}, too large`;
     else {
       const text = decodeText(await readFile(abs));
@@ -211,22 +247,10 @@ export async function buildPack(opts: PackOptions): Promise<Pack> {
 
   const blocks = included.map((e) => encodeFile(e.path, e.content!));
   const maxChars = opts.maxChars ?? 0;
-  const groups: string[][] = [[]];
-  let size = 0;
-  for (const block of blocks) {
-    const current = groups[groups.length - 1];
-    if (maxChars > 0 && current.length > 0 && size + block.length > maxChars) {
-      groups.push([block]);
-      size = block.length;
-    } else {
-      current.push(block);
-      size += block.length;
-    }
-  }
-
-  const total = groups.length;
   const stats = `${included.length} files${entries.length > included.length ? `, ${entries.length - included.length} listed only` : ""}`;
-  const parts = groups.map((group, index) => {
+  const tree = renderTree(name, entries);
+
+  const header = (index: number, total: number): string[] => {
     const partNote = total > 1 ? ` · part ${index + 1}/${total}` : "";
     const head = [`${MARKER} COCCOPILOT PACK v1 · ${name}${commit ? ` @ ${commit}` : ""} · ${stats}${partNote}`, ""];
     if (index === 0) {
@@ -240,15 +264,36 @@ export async function buildPack(opts: PackOptions): Promise<Pack> {
         INSTRUCTIONS_CLOSE,
         "",
         `${MARKER} TREE`,
-        renderTree(name, entries),
+        tree,
         "",
       );
     } else {
       head.push(`Part ${index + 1} of ${total} of the "${name}" snapshot; part 1 has the folder structure and instructions.`, "");
     }
     head.push(`${MARKER} FILES`);
-    return [...head, ...group, `${MARKER} EOF`, ""].join("\n");
-  });
+    return head;
+  };
+  const footer = (index: number, total: number) =>
+    `${MARKER} EOF${total > 1 ? ` · end of part ${index + 1}/${total}` : ""}`;
+
+  // The header and footer count toward a part's size: in a large repository the tree
+  // alone can be a sizeable share of part 1. "9999" leaves room for the real numbers.
+  const overhead = (index: number) => header(index, 9999).join("\n").length + footer(index, 9999).length + 2;
+  const groups: string[][] = [[]];
+  let size = overhead(0);
+  for (const block of blocks) {
+    const current = groups[groups.length - 1];
+    if (maxChars > 0 && current.length > 0 && size + block.length + 1 > maxChars) {
+      groups.push([block]);
+      size = overhead(groups.length - 1) + block.length + 1;
+    } else {
+      current.push(block);
+      size += block.length + 1;
+    }
+  }
+
+  const total = groups.length;
+  const parts = groups.map((group, index) => [...header(index, total), ...group, footer(index, total), ""].join("\n"));
 
   return { name, entries, parts };
 }

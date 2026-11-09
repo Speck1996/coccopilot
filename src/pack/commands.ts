@@ -8,7 +8,7 @@ import { Workspace } from "../sandbox/workspace.js";
 import { describePlan, failureReport, planChanges, writePlan } from "./apply.js";
 import { INSTRUCTIONS_CLOSE, INSTRUCTIONS_OPEN, parseChanges } from "./format.js";
 import { packToDocx } from "./docx.js";
-import { buildPack, DEFAULT_MAX_FILE_BYTES } from "./pack.js";
+import { buildPack, CHARS_PER_TOKEN, CONTEXT_TOKENS, DEFAULT_MAX_CHARS, DEFAULT_MAX_FILE_BYTES, PACK_TOKEN_BUDGET } from "./pack.js";
 import { parseSkillList, renderSkills, resolveSkills, type Skill } from "../agent/skills.js";
 
 export const PACK_FORMATS = ["txt", "docx"] as const;
@@ -24,6 +24,7 @@ const log = (msg: string) => console.log(`[coccopilot] ${msg}`);
 export interface PackArgs {
   cwd?: string;
   output?: string;
+  include: string[];
   exclude: string[];
   defaultExcludes: boolean;
   maxFileBytes?: number;
@@ -54,13 +55,19 @@ function takeValue(argv: string[], i: number, flag: string): string {
   return v;
 }
 
+/** "a, b,c" -> ["a", "b", "c"]: lets one flag carry several paths. */
+function splitList(value: string): string[] {
+  return value.split(",").map((v) => v.trim()).filter(Boolean);
+}
+
 export function parsePackArgs(argv: string[]): PackArgs {
-  const args: PackArgs = { exclude: [], defaultExcludes: true, clipboard: true, task: "", skillFiles: [] };
+  const args: PackArgs = { include: [], exclude: [], defaultExcludes: true, clipboard: true, task: "", skillFiles: [] };
   const positionals: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--cwd") args.cwd = takeValue(argv, ++i, a);
     else if (a === "-o" || a === "--output") args.output = takeValue(argv, ++i, a);
+    else if (a === "--include") args.include.push(...splitList(takeValue(argv, ++i, a)));
     else if (a === "--exclude") args.exclude.push(takeValue(argv, ++i, a));
     else if (a === "--no-default-excludes") args.defaultExcludes = false;
     else if (a === "--max-file-bytes") args.maxFileBytes = Number(takeValue(argv, ++i, a));
@@ -115,10 +122,14 @@ export function printPackUsage(): void {
       "  -o, --output <path>      pack file (default: <workspace>/.coccopilot/<name>.pack.<format>)",
       "  --format txt|docx        pack as plain text or as a Word document (default: from -o's",
       "                           extension, else txt); --docx is short for --format docx",
+      "  --include <glob>         inline only matching files or folders; repeat it or use commas",
+      "                           (--include src/api --include src/db,README.md); a folder path",
+      "                           includes everything under it; the rest stay in the tree, listed only",
       "  --exclude <glob>         leave matching files out (repeatable; \"dir/\" for a directory)",
       "  --no-default-excludes    also inline lockfiles, minified bundles and source maps",
       `  --max-file-bytes <n>     list larger files without their content (default: ${DEFAULT_MAX_FILE_BYTES})`,
-      "  --max-chars <n>          split the pack into parts of about n characters (default: one file)",
+      `  --max-chars <n>          split the pack into parts of at most about n characters, so Copilot`,
+      `                           reads each in full (default: ${DEFAULT_MAX_CHARS}; 0 = one file)`,
       "  --no-clipboard           don't copy the kick-off message",
       "  --skills <list>          roles for Copilot (developer, simplifier, reviewer, documenter, all, …)",
       "  --skill <file.md>        load a custom skill file and use it (repeatable)",
@@ -156,10 +167,19 @@ export function kickoffMessage(
 ): string {
   const files = fileNames.map((f) => `"${f}"`).join(", ");
   const what = format === "docx" ? "a Word document holding a snapshot" : "a plain-text snapshot";
+  const many = fileNames.length > 1;
   return [
-    `I've attached ${files}: ${what} of my repository. It starts with the folder structure,`,
-    `then holds every text file between "@@@ FILE <path>" and "@@@ END <path>" lines.`,
+    many
+      ? `I've attached ${files}: ${fileNames.length} parts of ${what} of my repository. Part 1 starts with the folder`
+      : `I've attached ${files}: ${what} of my repository. It starts with the folder structure,`,
+    many
+      ? `structure; together the parts hold the text files between "@@@ FILE <path>" and "@@@ END <path>" lines.`
+      : `then holds the text files between "@@@ FILE <path>" and "@@@ END <path>" lines.`,
+    `Files the tree marks "(not included: …)" are not in the snapshot: if you need one, ask me for it.`,
     "Please read it as the current state of my code: work from the full file contents, not a summary.",
+    many
+      ? `Each part ends with an "@@@ EOF · end of part <n>/${fileNames.length}" line: if you can't see that line in a part, it was cut off.`
+      : `It ends with an "@@@ EOF" line: if you can't see that line, the attachment was cut off.`,
     "If the attachment looks cut off or you can't open part of it, tell me instead of guessing at the missing code.",
     "",
     INSTRUCTIONS_OPEN,
@@ -182,10 +202,11 @@ export async function runPack(args: PackArgs): Promise<void> {
 
   const pack = await buildPack({
     root,
+    include: args.include,
     exclude: args.exclude,
     defaultExcludes: args.defaultExcludes,
     maxFileBytes: args.maxFileBytes,
-    maxChars: args.maxChars,
+    maxChars: args.maxChars ?? DEFAULT_MAX_CHARS,
     skipPaths: output ? [output] : [],
     instructions,
     documentKind: kind,
@@ -204,9 +225,27 @@ export async function runPack(args: PackArgs): Promise<void> {
 
   const included = pack.entries.filter((e) => e.content !== undefined).length;
   const chars = pack.parts.reduce((n, p) => n + p.length, 0);
-  log(`packed ${included} file(s) from ${root} (${chars} chars, ~${Math.round(chars / 4)} tokens)`);
-  for (const e of pack.entries.filter((e) => e.skipped)) log(`  listed only: ${e.path} (${e.skipped})`);
+  const tokens = Math.round(chars / CHARS_PER_TOKEN);
+  log(`packed ${included} file(s) from ${root} (${chars} chars, ~${tokens} tokens)`);
+  const listedOnly = pack.entries.filter((e) => e.skipped);
+  const outside = listedOnly.filter((e) => e.skipped === "outside --include");
+  for (const e of listedOnly) if (e.skipped !== "outside --include") log(`  listed only: ${e.path} (${e.skipped})`);
+  if (outside.length) log(`  listed only: ${outside.length} file(s) outside --include`);
   for (const p of paths) log(`wrote ${p}`);
+  if (tokens > PACK_TOKEN_BUDGET) {
+    log(
+      `warning: ~${tokens} tokens is more than Copilot's ~${CONTEXT_TOKENS / 1000}k-token context window can hold with room ` +
+        "to work; it will miss part of the code. Narrow the pack with --include or --exclude.",
+    );
+  }
+  const limit = args.maxChars ?? DEFAULT_MAX_CHARS;
+  const oversized = pack.parts.map((p, i) => ({ i, n: p.length })).filter(({ n }) => n > (limit || DEFAULT_MAX_CHARS));
+  for (const { i, n } of oversized) {
+    log(
+      `warning: ${basename(paths[i])} is ${n} chars; Copilot may read only the start of it` +
+        (limit ? " (a single file is larger than --max-chars: --exclude it or lower --max-file-bytes)" : " (pass --max-chars to split)"),
+    );
+  }
 
   const message = kickoffMessage(paths.map((p) => basename(p)), instructions, args.task, format, skills);
   const clipboard = args.clipboard ? await detectClipboard() : null;
