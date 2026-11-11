@@ -14,6 +14,9 @@
  * count is optional and the parser falls back to the `@@@ END` line. Anything outside a
  * block (prose, markdown fences, the pack's tree) is ignored, and directives inside an
  * instructions region are skipped so the format's own examples are never applied.
+ *
+ * The parser also reads the `<file path="…">` … `</file>` elements of a Repomix XML pack
+ * (and of a reply that imitates it) as full-file writes, so `apply` unpacks an XML pack.
  */
 
 export const MARKER = "@@@";
@@ -45,6 +48,9 @@ const SEARCH_OPEN = /^<{5,9}[ \t]*SEARCH[ \t]*$/;
 const SEARCH_SPLIT = /^={5,9}[ \t]*$/;
 const SEARCH_CLOSE = /^>{5,9}[ \t]*REPLACE[ \t]*$/;
 const FENCE = /^(`{3,}|~{3,})[\w.+-]*[ \t]*$/;
+const XML_FILE_OPEN = /^<file\s+path=["']([^"']+)["']\s*>[ \t]*$/;
+const XML_FILE_CLOSE = /^<\/file>[ \t]*$/;
+const XML_NEXT = /^(<file\s+path=|<\/files>)/;
 
 /** Encode one file as a FILE block with an exact line count. */
 export function encodeFile(path: string, content: string): string {
@@ -107,6 +113,37 @@ export function parseChanges(input: string): ParsedChanges {
       i++;
       continue;
     }
+    const xml = XML_FILE_OPEN.exec(line);
+    if (xml) {
+      i++;
+      const header = i;
+      const path = cleanPath(xml[1]);
+      // A file may itself contain a "</file>" line: prefer the one followed by the next
+      // <file>, </files> or the end of the input, else take the first.
+      let first = -1;
+      let end = -1;
+      for (let j = i; j < lines.length; j++) {
+        if (XML_FILE_OPEN.test(lines[j]) && first >= 0) break;
+        if (!XML_FILE_CLOSE.test(lines[j])) continue;
+        if (first < 0) first = j;
+        let k = j + 1;
+        while (k < lines.length && lines[k].trim() === "") k++;
+        if (k >= lines.length || XML_NEXT.test(lines[k])) {
+          end = j;
+          break;
+        }
+      }
+      if (end < 0) end = first;
+      if (end < 0) {
+        errors.push(`line ${header}: <file path="${path}"> has no closing </file>`);
+        continue;
+      }
+      const body = lines.slice(i, end);
+      i = end + 1;
+      ops.push({ kind: "file", path, content: body.length ? body.join("\n") + "\n" : "", line: header });
+      continue;
+    }
+
     const m = DIRECTIVE.exec(line);
     i++;
     if (!m) continue;

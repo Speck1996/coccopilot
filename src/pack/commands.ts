@@ -8,15 +8,17 @@ import { Workspace } from "../sandbox/workspace.js";
 import { describePlan, failureReport, planChanges, writePlan } from "./apply.js";
 import { INSTRUCTIONS_CLOSE, INSTRUCTIONS_OPEN, parseChanges } from "./format.js";
 import { packToDocx } from "./docx.js";
+import { buildRepomixPack, XML_EOF } from "./repomix.js";
 import { buildPack, CHARS_PER_TOKEN, CONTEXT_TOKENS, DEFAULT_MAX_CHARS, DEFAULT_MAX_FILE_BYTES, PACK_TOKEN_BUDGET } from "./pack.js";
 import { parseSkillList, renderSkills, resolveSkills, type Skill } from "../agent/skills.js";
 
-export const PACK_FORMATS = ["txt", "docx"] as const;
+export const PACK_FORMATS = ["txt", "docx", "xml"] as const;
 export type PackFormat = (typeof PACK_FORMATS)[number];
 
 const FORMAT_INFO: Record<PackFormat, { ext: string; kind: string }> = {
   txt: { ext: ".txt", kind: "text file" },
   docx: { ext: ".docx", kind: "Word document" },
+  xml: { ext: ".xml", kind: "XML file" },
 };
 
 const log = (msg: string) => console.log(`[coccopilot] ${msg}`);
@@ -77,6 +79,7 @@ export function parsePackArgs(argv: string[]): PackArgs {
       if (!(PACK_FORMATS as readonly string[]).includes(v)) throw new Error(`--format must be one of ${PACK_FORMATS.join(", ")}, got ${v}`);
       args.format = v as PackFormat;
     } else if (a === "--docx") args.format = "docx";
+    else if (a === "--xml" || a === "--repomix") args.format = "xml";
     else if (a === "--no-clipboard") args.clipboard = false;
     else if (a === "--skills") args.skills = [...(args.skills ?? []), ...parseSkillList(takeValue(argv, ++i, a))];
     else if (a === "--skill") args.skillFiles.push(takeValue(argv, ++i, a));
@@ -111,7 +114,8 @@ export function printPackUsage(): void {
       'usage: coccopilot pack [options] ["<task>"]',
       "       coccopilot apply [<changes.txt> | -] [options]",
       "",
-      "  pack:  encode the workspace (folder structure + every text file) into one .txt or .docx file",
+      "  pack:  encode the workspace (folder structure + every text file) into a .txt, .docx or",
+      "         (with repomix) a single .xml file",
       "         to upload to Copilot, and copy a kick-off message that teaches it the change format.",
       "  apply: decode the change set from Copilot's reply (clipboard by default, a file, or",
       "         stdin with -) and apply it to the workspace. Nothing is written unless every",
@@ -120,8 +124,10 @@ export function printPackUsage(): void {
       "pack options:",
       "  --cwd <dir>              workspace root (default: current directory)",
       "  -o, --output <path>      pack file (default: <workspace>/.coccopilot/<name>.pack.<format>)",
-      "  --format txt|docx        pack as plain text or as a Word document (default: from -o's",
-      "                           extension, else txt); --docx is short for --format docx",
+      "  --format txt|docx|xml    pack as plain text, a Word document, or one repomix XML file",
+      "                           (default: from -o's extension, else txt); --docx and --xml",
+      "                           (or --repomix) are short for --format docx / xml. xml runs",
+      "                           repomix (on PATH, COCCOPILOT_REPOMIX, else npx) and is never split",
       "  --include <glob>         inline only matching files or folders; repeat it or use commas",
       "                           (--include src/api --include src/db,README.md); a folder path",
       "                           includes everything under it; the rest stay in the tree, listed only",
@@ -151,10 +157,34 @@ export function partPath(base: string, index: number, total: number, ext = ".txt
   return base.replace(re, (found) => `.part${index}of${total}${found || ext}`);
 }
 
-/** --format wins; otherwise a .docx output path means docx; otherwise txt. */
+/** --format wins; otherwise a .docx/.xml output path picks that format; otherwise txt. */
 export function resolveFormat(args: Pick<PackArgs, "format" | "output">): PackFormat {
   if (args.format) return args.format;
-  return args.output && /\.docx$/i.test(args.output) ? "docx" : "txt";
+  if (args.output && /\.docx$/i.test(args.output)) return "docx";
+  if (args.output && /\.xml$/i.test(args.output)) return "xml";
+  return "txt";
+}
+
+/** The kick-off message for a repomix XML pack: one file, XML layout, @@@ answers. */
+function xmlKickoffMessage(fileName: string, instructions: string, task: string, skills: Skill[]): string {
+  return [
+    `I've attached "${fileName}": an XML snapshot of my repository made with Repomix. <directory_structure> lists`,
+    `its folders and files, and each <file path="…"> element inside <files> holds the full content of one text file,`,
+    "verbatim. Files listed in the structure without a <file> element (binaries, very large or generated files) are",
+    "not in the snapshot: if you need one, ask me for it.",
+    "Please read it as the current state of my code: work from the full file contents, not a summary.",
+    `It ends with an "${XML_EOF}" line after the <instruction> section: if you can't see that line, the attachment was cut off.`,
+    "If the attachment looks cut off or you can't open part of it, tell me instead of guessing at the missing code.",
+    `Answer with the plain-text "@@@" change set described below, never with XML <file> elements: copy SEARCH text`,
+    "from inside the <file> elements (without the tags).",
+    "",
+    INSTRUCTIONS_OPEN,
+    instructions.trim(),
+    INSTRUCTIONS_CLOSE,
+    ...(skills.length ? ["", renderSkills(skills, "pack")] : []),
+    "",
+    task ? `My task: ${task}` : "Wait for my task.",
+  ].join("\n");
 }
 
 /** The message pasted into the chat with the uploaded pack. */
@@ -165,6 +195,7 @@ export function kickoffMessage(
   format: PackFormat = "txt",
   skills: Skill[] = [],
 ): string {
+  if (format === "xml") return xmlKickoffMessage(fileNames[0], instructions, task, skills);
   const files = fileNames.map((f) => `"${f}"`).join(", ");
   const what = format === "docx" ? "a Word document holding a snapshot" : "a plain-text snapshot";
   const many = fileNames.length > 1;
@@ -199,6 +230,7 @@ export async function runPack(args: PackArgs): Promise<void> {
   const output = args.output ? resolve(args.output) : undefined;
   const format = resolveFormat(args);
   const { ext, kind } = FORMAT_INFO[format];
+  if (format === "xml") return runRepomixPack(args, root, output, instructions, skills);
 
   const pack = await buildPack({
     root,
@@ -256,6 +288,62 @@ export async function runPack(args: PackArgs): Promise<void> {
       "",
       `  1. Upload ${total === 1 ? "the pack file" : `all ${total} pack files`} to Copilot (attach it, or put it in the`,
       "     workspace/OneDrive folder Copilot can see).",
+      copied
+        ? "  2. Paste the kick-off message (already on your clipboard), add your task, and send."
+        : "  2. Send this kick-off message along with it:\n\n" + message + "\n",
+      "  3. Copy Copilot's reply and run `coccopilot apply` (or keep `coccopilot apply --watch` running).",
+      "",
+    ].join("\n"),
+  );
+}
+
+/** `pack --format xml`: the whole repository as one repomix XML file. */
+async function runRepomixPack(
+  args: PackArgs,
+  root: string,
+  output: string | undefined,
+  instructions: string,
+  skills: Skill[],
+): Promise<void> {
+  const path = output ?? join(root, CACHE_DIRNAME, `${basename(root)}.pack.xml`);
+  await mkdir(dirname(path), { recursive: true });
+  if (!output) await writeFile(join(root, CACHE_DIRNAME, ".gitignore"), "*\n", "utf8").catch(() => undefined);
+  if (args.maxChars) log("note: --max-chars is ignored with --format xml; the XML pack is always one file");
+
+  log("packing with repomix…");
+  const pack = await buildRepomixPack({
+    root,
+    output: path,
+    include: args.include,
+    exclude: args.exclude,
+    defaultExcludes: args.defaultExcludes,
+    maxFileBytes: args.maxFileBytes,
+    instructions,
+  });
+  const chars = pack.xml.length;
+  const tokens = Math.round(chars / CHARS_PER_TOKEN);
+  log(`packed ${pack.files.length} file(s) from ${root} (${chars} chars, ~${tokens} tokens)`);
+  log(`wrote ${path}`);
+  if (tokens > PACK_TOKEN_BUDGET) {
+    log(
+      `warning: ~${tokens} tokens is more than Copilot's ~${CONTEXT_TOKENS / 1000}k-token context window can hold with room ` +
+        "to work; it will miss part of the code. Narrow the pack with --include or --exclude.",
+    );
+  } else if (chars > DEFAULT_MAX_CHARS) {
+    log(
+      `warning: ${basename(path)} is ${chars} chars; Copilot's document reader may read only the start of it. ` +
+        "Narrow it with --include/--exclude, or use --format txt|docx, which split into parts.",
+    );
+  }
+
+  const message = kickoffMessage([basename(path)], instructions, args.task, "xml", skills);
+  const clipboard = args.clipboard ? await detectClipboard() : null;
+  const copied = clipboard ? await clipboard.write(message).then(() => true, () => false) : false;
+  console.log(
+    [
+      "",
+      "  1. Upload the XML pack file to Copilot (attach it, or put it in the workspace/OneDrive",
+      "     folder Copilot can see).",
       copied
         ? "  2. Paste the kick-off message (already on your clipboard), add your task, and send."
         : "  2. Send this kick-off message along with it:\n\n" + message + "\n",

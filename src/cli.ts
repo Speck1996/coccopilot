@@ -143,7 +143,7 @@ function printUsage(): void {
       "  install <tool>         install a known tool (pytest, pyspark, python, git, …)",
       "  install --all          install every known tool that is missing",
       "  skills [<name>]        list the available skills, or print one",
-      "  pack                   encode the workspace into one .txt file to upload to Copilot",
+      "  pack                   encode the workspace into a .txt/.docx file, or one repomix .xml (--xml)",
       "  apply                  apply the change set from Copilot's reply (see: coccopilot pack --help)",
     ].join("\n"),
   );

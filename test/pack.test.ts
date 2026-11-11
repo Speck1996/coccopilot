@@ -9,6 +9,8 @@ import { encodeFile, INSTRUCTIONS_CLOSE, INSTRUCTIONS_OPEN, parseChanges } from 
 import { buildPack, excludeMatcher, includeMatcher, renderTree } from "../src/pack/pack.js";
 import { crc32, packToDocx } from "../src/pack/docx.js";
 import { kickoffMessage, parsePackArgs, partPath, resolveFormat } from "../src/pack/commands.js";
+import { instructionSection, REPOMIX_VERSION, toRepomixIgnore, toRepomixInclude } from "../src/pack/repomix.js";
+import { spawnSync } from "node:child_process";
 import { inflateRawSync } from "node:zlib";
 import { describePlan, planChanges, writePlan } from "../src/pack/apply.js";
 import { Workspace } from "../src/sandbox/workspace.js";
@@ -435,7 +437,11 @@ test("pack args: --format, --docx, and inference from the output extension", () 
   assert.equal(resolveFormat(parsePackArgs(["-o", "repo.docx", "--format", "txt"])), "txt");
   assert.deepEqual(parsePackArgs(["--include", "src/a", "--include", "*.md", "task"]).include, ["src/a", "*.md"]);
   assert.deepEqual(parsePackArgs(["--include", "src/api, src/db,README.md", "--include", "lib/"]).include, ["src/api", "src/db", "README.md", "lib/"]);
-  assert.throws(() => parsePackArgs(["--format", "pdf"]), /--format must be one of txt, docx/);
+  assert.throws(() => parsePackArgs(["--format", "pdf"]), /--format must be one of txt, docx, xml/);
+  assert.equal(resolveFormat(parsePackArgs(["--xml"])), "xml");
+  assert.equal(resolveFormat(parsePackArgs(["--repomix"])), "xml");
+  assert.equal(resolveFormat(parsePackArgs(["--format", "xml"])), "xml");
+  assert.equal(resolveFormat(parsePackArgs(["-o", "repo.xml"])), "xml");
   assert.equal(partPath("x/r.pack.docx", 2, 3, ".docx"), "x/r.pack.part2of3.docx");
   assert.equal(partPath("x/r.pack.txt", 1, 2), "x/r.pack.part1of2.txt");
   assert.equal(partPath("x/r.pack", 1, 2, ".docx"), "x/r.pack.part1of2.docx");
@@ -455,3 +461,122 @@ test("e2e: coccopilot pack --format docx writes a Word document", { timeout: 30_
     await removeWorkspace(dir);
   }
 });
+
+const REPOMIX_XML = [
+  "This file is a merged representation of the entire codebase, combined into a single document by Repomix.",
+  "<directory_structure>",
+  "src/",
+  "  a.ts",
+  "notes.md",
+  "</directory_structure>",
+  "",
+  "<files>",
+  "This section contains the contents of the repository's files.",
+  "",
+  '<file path="src/a.ts">',
+  "export const a = 1 < 2 && 3 > 2;",
+  "</file>",
+  "",
+  '<file path="notes.md">',
+  "a quoted tag:",
+  "</file>",
+  "still notes, with an @@@ line:",
+  "@@@ END notes.md",
+  "</file>",
+  "",
+  "</files>",
+  "",
+  "<instruction>",
+  instructionSection('@@@ FILE example.ts\nx\n@@@ END example.ts\n<file path="example2.ts">\ny\n</file>'),
+  "</instruction>",
+  "",
+].join("\n");
+
+test("xml: parseChanges unpacks a repomix pack and skips the instruction examples", () => {
+  const parsed = parseChanges(REPOMIX_XML);
+  assert.deepEqual(parsed.errors, []);
+  assert.deepEqual(
+    parsed.ops.map((op) => (op.kind === "file" ? [op.path, op.content] : [op.kind])),
+    [
+      ["src/a.ts", "export const a = 1 < 2 && 3 > 2;\n"],
+      ["notes.md", "a quoted tag:\n</file>\nstill notes, with an @@@ line:\n@@@ END notes.md\n"],
+    ],
+  );
+});
+
+test("xml: a reply that imitates the XML layout still applies, an unclosed one is an error", () => {
+  const ok = parseChanges('Here you go:\n<file path="./src/b.ts">\nexport const b = 2;\n</file>\nDone.');
+  assert.deepEqual(ok.ops.map((op) => op.kind === "file" && [op.path, op.content]), [["src/b.ts", "export const b = 2;\n"]]);
+  const bad = parseChanges('<file path="src/c.ts">\nexport const c = 3;\n');
+  assert.equal(bad.ops.length, 0);
+  assert.match(bad.errors[0], /has no closing <\/file>/);
+});
+
+test("xml: coccopilot globs translate to repomix globs", () => {
+  assert.deepEqual(toRepomixIgnore("*.min.js"), ["**/*.min.js"]);
+  assert.deepEqual(toRepomixIgnore("node_modules/"), ["**/node_modules/**"]);
+  assert.deepEqual(toRepomixIgnore("src/gen/"), ["src/gen/**"]);
+  assert.deepEqual(toRepomixIgnore("./docs/*.md"), ["docs/*.md"]);
+  assert.deepEqual(toRepomixInclude("src/billing"), ["src/billing", "src/billing/**"]);
+  assert.deepEqual(toRepomixInclude("lib/"), ["lib", "lib/**"]);
+  assert.deepEqual(toRepomixInclude("src/**/*.ts"), ["src/**/*.ts"]);
+});
+
+test("xml: the kick-off message describes the XML layout and asks for @@@ answers", () => {
+  const msg = kickoffMessage(["repo.pack.xml"], "INSTR", "do it", "xml");
+  assert.match(msg, /"repo\.pack\.xml": an XML snapshot/);
+  assert.match(msg, /<file path="…">/);
+  assert.match(msg, /never with XML <file> elements/);
+  assert.match(msg, /"@@@ EOF" line/);
+  assert.match(msg, /INSTR/);
+  assert.match(msg, /My task: do it/);
+});
+
+/** The e2e XML test needs repomix: on PATH, via COCCOPILOT_REPOMIX, or in the npx cache. */
+const hasRepomix =
+  !!process.env.COCCOPILOT_REPOMIX ||
+  spawnSync("repomix", ["--version"]).status === 0 ||
+  spawnSync("npx", ["--no-install", `repomix@${REPOMIX_VERSION}`, "--version"]).status === 0;
+
+test(
+  "e2e: coccopilot pack --xml, apply Copilot's change set, and unpack the XML",
+  { timeout: 120_000, skip: hasRepomix ? false : "repomix not available" },
+  async () => {
+    const dir = await workspaceFromFixture();
+    const copy = await emptyWorkspace();
+    try {
+      await writeFile(join(dir, "package-lock.json"), "{}\n");
+      const packed = await runCli(["pack", "--xml", "--no-clipboard", "--cwd", dir, "rename greet"]);
+      assert.equal(packed.code, 0, packed.stdout);
+      const xmlPath = join(dir, ".coccopilot", `${dir.split("/").pop()}.pack.xml`);
+      const xml = await readFile(xmlPath, "utf8");
+      assert.match(packed.stdout, /an XML snapshot of my repository made with Repomix/);
+      assert.match(xml, /<file path="src\/greet\.js">/);
+      assert.doesNotMatch(xml, /<file path="package-lock\.json">/, "default excludes apply");
+      assert.doesNotMatch(xml, /<file path="\.coccopilot/);
+      assert.match(xml, /<!-- coccopilot:instructions -->/);
+      assert.match(xml, /@@@ EOF\s*<\/instruction>/);
+
+      // Copilot answers with the usual @@@ change set; apply runs it against the workspace.
+      const greet = await readFile(join(dir, "src/greet.js"), "utf8");
+      const line = greet.split("\n").find((l) => l.includes("Hello"))!;
+      const changes = join(dir, "changes.txt");
+      await writeFile(
+        changes,
+        reply(`@@@ EDIT src/greet.js\n<<<<<<< SEARCH\n${line}\n=======\n${line.replace("Hello", "Hi")}\n>>>>>>> REPLACE\n@@@ END src/greet.js`),
+      );
+      const applied = await runCli(["apply", changes, "-y", "--no-clipboard", "--cwd", dir]);
+      assert.equal(applied.code, 0, applied.stdout);
+      assert.equal(await readFile(join(dir, "src/greet.js"), "utf8"), greet.replace("Hello", "Hi"));
+
+      // The XML pack itself unpacks into a copy of the snapshot.
+      const unpacked = await runCli(["apply", xmlPath, "-y", "--no-clipboard", "--cwd", copy]);
+      assert.equal(unpacked.code, 0, unpacked.stdout);
+      assert.equal(await readFile(join(copy, "src/greet.js"), "utf8"), greet);
+      assert.ok(!existsSync(join(copy, "example.ts")), "the instruction examples are never applied");
+    } finally {
+      await removeWorkspace(dir);
+      await removeWorkspace(copy);
+    }
+  },
+);

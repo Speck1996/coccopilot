@@ -6,7 +6,7 @@ import { encodeFile, INSTRUCTIONS_CLOSE, INSTRUCTIONS_OPEN, MARKER } from "./for
 
 /** Never packed: VCS internals, coccopilot's own state, dependency and build output. */
 const ALWAYS_IGNORED_DIRS = new Set([".git", ".hg", ".svn", ".coccopilot"]);
-const WALK_IGNORED_DIRS = new Set([
+export const WALK_IGNORED_DIRS = new Set([
   "node_modules", "dist", "build", "out", "target", ".next", ".nuxt", ".cache", ".venv", "venv",
   "__pycache__", ".pytest_cache", ".mypy_cache", ".tox", ".gradle", ".idea", ".vscode", "coverage",
 ]);

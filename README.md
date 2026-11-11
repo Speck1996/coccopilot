@@ -209,8 +209,8 @@ more reliably than they count line numbers. `apply`:
 
 | `pack` option | Description |
 | --- | --- |
-| `-o, --output <path>` | Pack file. Default: `<workspace>/.coccopilot/<name>.pack.<txt\|docx>` (gitignored). |
-| `--format txt\|docx` | Plain text or a Word document (`--docx` for short). Default: from `-o`'s extension, else `txt`. |
+| `-o, --output <path>` | Pack file. Default: `<workspace>/.coccopilot/<name>.pack.<txt\|docx\|xml>` (gitignored). |
+| `--format txt\|docx\|xml` | Plain text, a Word document (`--docx`), or one [Repomix](https://repomix.com) XML file (`--xml` / `--repomix`). Default: from `-o`'s extension, else `txt`. |
 | `--include <glob>` | Inline only matching files or folders. Repeat it or use commas to pick several: `--include src/api --include src/db,README.md`. A plain folder path includes everything under it. The rest stay in the tree as "not included", so Copilot sees the whole layout and can ask for a file. |
 | `--exclude <glob>` | Leave matching files out (repeatable; `dir/` excludes a directory). |
 | `--no-default-excludes` | Also inline lockfiles, minified bundles and source maps. |
@@ -251,6 +251,26 @@ Upload every part. `pack` warns when a part is still too large (a single huge fi
 To keep a large repository in **one** file, pack only the area the task touches:
 `coccopilot pack --include src/billing --include "src/shared/**/*.ts" --docx "<task>"`. `apply`
 does not read `.docx` packs back; it never needs to, Copilot's replies are plain text.
+
+**One XML file with Repomix (`--xml`).** `coccopilot pack --xml "<task>"` runs
+[Repomix](https://repomix.com) over the workspace and writes the **whole repository as a
+single XML file** (`.coccopilot/<name>.pack.xml`, never split): a `<directory_structure>`
+section, then one `<file path="…">` element per text file, verbatim. The change-format
+instructions go in Repomix's trailing `<instruction>` section, followed by an `@@@ EOF`
+line so Copilot can tell whether it read to the end. Repomix comes from `repomix` on
+your PATH, from `COCCOPILOT_REPOMIX` (a command, e.g. `bunx repomix`), or else from
+`npx --yes repomix@1.19.0`. coccopilot passes its own Repomix config, so a
+`repomix.config.json` in the project can't switch on line numbers, compression or
+comment stripping, any of which would make SEARCH text stop matching the real files.
+`--include`, `--exclude`, `--no-default-excludes` and `--max-file-bytes` work as for
+`txt`; `--max-chars` does not apply (the pack warns above 350k characters instead).
+Copilot still answers with the plain-text `@@@` change set (the prompt and kick-off
+message tell it never to answer in XML), so `apply` works the same way after an XML pack.
+`apply` also reads `<file path="…">` … `</file>` elements as full-file writes, so it can
+unpack the XML pack itself, and it still applies a reply that imitates the XML layout. A
+file whose content contains a `</file>` line is handled. The one difference from
+`txt`: Repomix trims each file's trailing whitespace, so an unpacked file ends in exactly
+one newline.
 
 The kick-off message repeats the change-format instructions, because Copilot may only
 retrieve parts of a large uploaded file. Applying a pack itself works too: it recreates
@@ -578,6 +598,7 @@ src/
     format.ts            pack / change-set text format: encoder and tolerant parser
     pack.ts              file selection, tree rendering, pack assembly and splitting
     docx.ts              a pack as a Word document: OOXML parts and a minimal zip writer
+    repomix.ts           a pack as one Repomix XML file (`--xml`)
     apply.ts             in-memory change planning, SEARCH matching, writing
     commands.ts          the `pack` and `apply` subcommands
   tools/

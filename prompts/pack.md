@@ -30,6 +30,7 @@ The operations:
 Rules:
 
 - Every `@@@` line starts at the beginning of the line. Paths are relative to the repository root, exactly as in the folder structure.
+- Write changes only in this `@@@` format, whatever the snapshot looks like. If the snapshot is XML (each file in a `<file path="…">` element), never answer with XML: a file's content is what is between its `<file>` tags, and its path is the `path` attribute.
 - Copy SEARCH text from the file's content in the attached snapshot (or from your own earlier change sets), never from memory. If you can't see a file you need, or only part of it, tell me which one instead of guessing; I'll send it.
 - Only include files you actually change. If my message is a question and needs no change, just answer it, with no change set.
 - Never use line numbers, "..." placeholders or "rest of the file unchanged" comments: the text you write is applied literally.
